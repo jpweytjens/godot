@@ -1,0 +1,18 @@
+[project]
+name = "cycling-eta"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "gpxpy>=1.6.2",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "scipy>=1.17.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
