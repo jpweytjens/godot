@@ -351,7 +351,7 @@ class AvgSpeedEstimator:
         self._prev_distance_m = distance_m
         self._prev_timestamp_ms = timestamp_ms
 
-    def estimate_remaining_s(
+    def predict(
         self, current_distance_m: float, total_distance_m: float, now_ms: int
     ) -> float:
         if self._total_time_s == 0 or self._total_distance_m == 0:
@@ -379,7 +379,7 @@ class RollingAvgSpeedEstimator:
         cutoff_ms = timestamp_ms - int(self._window_s * 1000)
         self._observations = [(t, v) for t, v in self._observations if t >= cutoff_ms]
 
-    def estimate_remaining_s(
+    def predict(
         self, current_distance_m: float, total_distance_m: float, now_ms: int
     ) -> float:
         if not self._observations:
