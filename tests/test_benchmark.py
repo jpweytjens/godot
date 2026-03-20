@@ -4,17 +4,10 @@ from benchmark import backtest
 
 
 class ConstantSpeedEstimator:
-    """Test double: always predicts remaining time at a fixed 20 km/h."""
+    """Test double: always predicts 20 km/h regardless of ride data."""
 
-    def reset(self):
-        pass
-
-    def update(self, timestamp_ms, distance_m, speed_kmh, elevation_m):
-        pass
-
-    def predict(self, current_distance_m, total_distance_m, now_ms):
-        remaining_m = total_distance_m - current_distance_m
-        return remaining_m / (20 / 3.6)
+    def predict(self, df: pd.DataFrame) -> pd.Series:
+        return pd.Series(20 / 3.6, index=df.index)
 
 
 def make_synthetic_ride(

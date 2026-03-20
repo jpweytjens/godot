@@ -1,151 +1,86 @@
-"""Online ETA estimators for cycling ride prediction."""
+"""ETA estimators for cycling ride prediction."""
 
-import numpy as np
+import pandas as pd
 
 ROLLING_WINDOW_S = 300.0
 
 
 class AvgSpeedEstimator:
-    """Estimates remaining time using cumulative average moving speed.
-
-    Tracks total distance and time while moving (speed >= 1 km/h),
-    and uses the resulting average speed to predict remaining time.
-    """
-
-    def reset(self) -> None:
-        """Reset internal state for a fresh backtest run."""
-        self._total_distance_m = 0.0
-        self._total_time_s = 0.0
-        self._prev_distance_m: float | None = None
-        self._prev_timestamp_ms: int | None = None
-
-    def update(
-        self,
-        timestamp_ms: int,
-        distance_m: float,
-        speed_kmh: float,
-        elevation_m: float,
-    ) -> None:
-        """Ingest one data point and update the cumulative average.
-
-        Parameters
-        ----------
-        timestamp_ms : int
-            Unix timestamp in milliseconds.
-        distance_m : float
-            Cumulative distance from ride start in meters.
-        speed_kmh : float
-            Current speed in km/h.
-        elevation_m : float
-            Current elevation in meters (unused, kept for protocol compatibility).
-        """
-        if self._prev_timestamp_ms is not None and speed_kmh >= 1.0:
-            dt_s = (timestamp_ms - self._prev_timestamp_ms) / 1000.0
-            dd_m = distance_m - self._prev_distance_m
-            if dt_s > 0 and dd_m >= 0:
-                self._total_distance_m += dd_m
-                self._total_time_s += dt_s
-        self._prev_distance_m = distance_m
-        self._prev_timestamp_ms = timestamp_ms
-
-    def predict(
-        self,
-        current_distance_m: float,
-        total_distance_m: float,
-        now_ms: int,
-    ) -> float:
-        """Predict remaining ride time in seconds.
-
-        Parameters
-        ----------
-        current_distance_m : float
-            Current position in meters from ride start.
-        total_distance_m : float
-            Total route distance in meters.
-        now_ms : int
-            Current timestamp in milliseconds (unused).
-
-        Returns
-        -------
-        float
-            Estimated remaining seconds, or nan if no data yet.
-        """
-        if self._total_time_s == 0 or self._total_distance_m == 0:
-            return np.nan
-        avg_speed_ms = self._total_distance_m / self._total_time_s
-        remaining_m = max(total_distance_m - current_distance_m, 0.0)
-        return remaining_m / avg_speed_ms
-
-
-class RollingAvgSpeedEstimator:
-    """Estimates remaining time using rolling average speed over a time window.
-
-    Only moving observations (speed >= 1 km/h) are kept. The buffer is
-    trimmed to the most recent ``window_s`` seconds on each update.
+    """Estimates speed using a backward-looking expanding window average.
 
     Parameters
     ----------
-    window_s : float or None, optional
-        Rolling window in seconds. Defaults to ROLLING_WINDOW_S (300 s).
+    moving_only : bool, optional
+        If True (default), denominator is total moving time (speed >= 1 km/h),
+        giving average moving speed. If False, denominator is total elapsed time.
     """
 
-    def __init__(self, window_s: float | None = None) -> None:
-        self._window_s = ROLLING_WINDOW_S if window_s is None else window_s
-        self._observations: list[tuple[int, float]] = []
+    def __init__(self, moving_only: bool = True) -> None:
+        self._moving_only = moving_only
 
-    def reset(self) -> None:
-        """Reset internal state for a fresh backtest run."""
-        self._observations = []
-
-    def update(
-        self,
-        timestamp_ms: int,
-        distance_m: float,
-        speed_kmh: float,
-        elevation_m: float,
-    ) -> None:
-        """Ingest one data point and maintain the rolling buffer.
+    def predict(self, df: pd.DataFrame) -> pd.Series:
+        """Return estimated speed (m/s) at each row using an expanding window.
 
         Parameters
         ----------
-        timestamp_ms : int
-            Unix timestamp in milliseconds.
-        distance_m : float
-            Cumulative distance in meters (unused, kept for protocol compatibility).
-        speed_kmh : float
-            Current speed in km/h.
-        elevation_m : float
-            Current elevation in meters (unused, kept for protocol compatibility).
-        """
-        if speed_kmh >= 1.0:
-            self._observations.append((timestamp_ms, speed_kmh))
-        cutoff_ms = timestamp_ms - int(self._window_s * 1000)
-        self._observations = [(t, v) for t, v in self._observations if t >= cutoff_ms]
-
-    def predict(
-        self,
-        current_distance_m: float,
-        total_distance_m: float,
-        now_ms: int,
-    ) -> float:
-        """Predict remaining ride time in seconds.
-
-        Parameters
-        ----------
-        current_distance_m : float
-            Current position in meters from ride start.
-        total_distance_m : float
-            Total route distance in meters.
-        now_ms : int
-            Current timestamp in milliseconds (unused).
+        df : pd.DataFrame
+            Ride DataFrame with timestamp_ms, distance_m, speed_kmh columns.
 
         Returns
         -------
-        float
-            Estimated remaining seconds, or nan if no observations in window.
+        pd.Series
+            Speed in m/s at each row. NaN until sufficient data is accumulated.
         """
-        if not self._observations:
-            return np.nan
-        rolling_avg_ms = np.mean([v for _, v in self._observations]) / 3.6
-        remaining_m = max(total_distance_m - current_distance_m, 0.0)
-        return remaining_m / rolling_avg_ms
+        dd = df["distance_m"].diff().clip(lower=0).fillna(0)
+        dt = df["timestamp_ms"].diff().fillna(0) / 1000.0
+        if self._moving_only:
+            is_moving = (df["speed_kmh"] >= 1.0).astype(float)
+            cum_dd = (dd * is_moving).cumsum()
+            cum_dt = (dt * is_moving).cumsum()
+        else:
+            cum_dd = dd.cumsum()
+            cum_dt = dt.cumsum()
+        return (cum_dd / cum_dt).where(cum_dt > 0)
+
+
+class RollingAvgSpeedEstimator:
+    """Estimates speed using a backward-looking rolling time window.
+
+    Parameters
+    ----------
+    window_s : float, optional
+        Rolling window size in seconds. Defaults to ROLLING_WINDOW_S (300 s).
+    moving_only : bool, optional
+        If True (default), only accumulate time and distance while moving
+        (speed >= 1 km/h).
+    """
+
+    def __init__(self, window_s: float | None = None, moving_only: bool = True) -> None:
+        self._window_s = ROLLING_WINDOW_S if window_s is None else window_s
+        self._moving_only = moving_only
+
+    def predict(self, df: pd.DataFrame) -> pd.Series:
+        """Return estimated speed (m/s) at each row using a rolling window.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Ride DataFrame with timestamp_ms, distance_m, speed_kmh columns.
+
+        Returns
+        -------
+        pd.Series
+            Speed in m/s at each row.
+        """
+        idx = pd.to_datetime(df["timestamp_ms"], unit="ms")
+        dd = df["distance_m"].diff().clip(lower=0).fillna(0)
+        dt = df["timestamp_ms"].diff().fillna(0) / 1000.0
+        if self._moving_only:
+            is_moving = (df["speed_kmh"] >= 1.0).astype(float)
+            dd = dd * is_moving
+            dt = dt * is_moving
+        window = f"{int(self._window_s)}s"
+        dd_roll = pd.Series(dd.values, index=idx).rolling(window, min_periods=1).sum()
+        dt_roll = pd.Series(dt.values, index=idx).rolling(window, min_periods=1).sum()
+        speed = (dd_roll / dt_roll).values
+        return pd.Series(speed, index=df.index)

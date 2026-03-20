@@ -59,7 +59,8 @@ _TABLE_STYLES = [
 ]
 
 ESTIMATORS = {
-    "AvgSpeed": AvgSpeedEstimator(),
+    "AvgSpeed (moving)": AvgSpeedEstimator(moving_only=True),
+    "AvgSpeed (total)": AvgSpeedEstimator(moving_only=False),
     # "Rolling 1min": RollingAvgSpeedEstimator(window_s=60),
     "Rolling 5min": RollingAvgSpeedEstimator(window_s=300),
     # "Rolling 10min": RollingAvgSpeedEstimator(window_s=600),
@@ -218,7 +219,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    paths = args.paths or list(Path("data").glob("*.gpx"))
+    paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
     if not paths:
         parser.error(
             "No GPX files found. Place .gpx files in data/ or pass paths as arguments."
