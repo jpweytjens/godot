@@ -20,6 +20,45 @@ from gpx import (
 )
 from plot import plot_comparison, plot_delta
 
+_N_INFO_COLS = 4  # ride, distance_method, speed_smoothed, route_type
+
+_TABLE_STYLES = [
+    # Booktabs-style outer rules + clean font
+    {
+        "selector": "",
+        "props": (
+            "border-collapse: collapse;"
+            "border-top: 2px solid #222;"
+            "border-bottom: 2px solid #222;"
+            "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;"
+            "font-size: 12.5px;"
+        ),
+    },
+    # Mid-rule below header
+    {"selector": "thead", "props": "border-bottom: 1px solid #888;"},
+    # No cell borders, comfortable padding
+    {"selector": "th, td", "props": "padding: 5px 12px; border: none;"},
+    # Numbers right-aligned, headers right-aligned
+    {"selector": "td", "props": "text-align: right;"},
+    {
+        "selector": "th",
+        "props": "text-align: right; font-weight: 600; background-color: #fff;",
+    },
+    # Info columns left-aligned
+    {
+        "selector": f"td:nth-child(-n+{_N_INFO_COLS}), th:nth-child(-n+{_N_INFO_COLS})",
+        "props": "text-align: left;",
+    },
+    # Alternating row shading
+    {"selector": "tbody tr:nth-child(even)", "props": "background-color: #f0f4f8;"},
+    {"selector": "tbody tr:hover", "props": "background-color: #dce8f5;"},
+    # Caption
+    {
+        "selector": "caption",
+        "props": "caption-side: top; font-size: 14px; font-weight: bold; padding-bottom: 8px; text-align: left;",
+    },
+]
+
 ESTIMATORS = {
     "AvgSpeed": AvgSpeedEstimator(),
     # "Rolling 1min": RollingAvgSpeedEstimator(window_s=60),
@@ -188,12 +227,38 @@ if __name__ == "__main__":
 
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
+
+    rename_map = {
+        "ride": "Ride",
+        "distance_method": "Distance",
+        "speed_smoothed": "Smoothed",
+        "route_type": "Type",
+        **{c: f"{col_to_name[c[:-4]]} MAE" for c in mae_cols},
+        **{c: f"{col_to_name[c[:-5]]} RMSE" for c in rmse_cols},
+    }
+    display_df = results_df.rename(columns=rename_map)
+    display_mae = [rename_map[c] for c in mae_cols]
+    display_rmse = [rename_map[c] for c in rmse_cols]
+    display_metric = display_mae + display_rmse
+
+    # Left border on first RMSE column to visually separate the two groups
+    first_rmse_pos = _N_INFO_COLS + len(display_mae) + 1  # nth-child is 1-indexed
+    sep_style = [
+        {
+            "selector": f"td:nth-child({first_rmse_pos}), th:nth-child({first_rmse_pos})",
+            "props": "border-left: 1px solid #ccc;",
+        }
+    ]
+
     styler = (
-        results_df.style.highlight_min(
-            axis=1, subset=pd.Index(mae_cols), props="font-weight: bold"
+        display_df.style.highlight_min(
+            axis=1, subset=pd.Index(display_mae), props="font-weight: bold"
         )
-        .highlight_min(axis=1, subset=pd.Index(rmse_cols), props="font-weight: bold")
-        .format({c: "{:.2f}" for c in metric_cols})
+        .highlight_min(axis=1, subset=pd.Index(display_rmse), props="font-weight: bold")
+        .format({c: "{:.2f}" for c in display_metric})
+        .set_table_styles(_TABLE_STYLES + sep_style)  # type: ignore[arg-type]
+        .set_caption("ETA Estimator Backtest Results")
+        .hide(axis="index")
     )
     html_path = out_dir / "results.html"
     styler.to_html(html_path)
