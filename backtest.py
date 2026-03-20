@@ -17,7 +17,6 @@ from gpx import (
     add_smooth_speed,
     read_gpx,
 )
-from matplotlib.gridspec import GridSpec
 
 from plot import plot_comparison, plot_delta, plot_speed
 
@@ -187,37 +186,61 @@ def run(
 
     results = {name: backtest(df, est) for name, est in ESTIMATORS.items()}
 
-    n_est = len(ESTIMATORS)
-    height_ratios = [3] * n_est + [5]
-    fig = plt.figure(figsize=(28, sum(height_ratios)))
-    gs = GridSpec(n_est + 1, 2, figure=fig, height_ratios=height_ratios)
-    for i, (name, result) in enumerate(results.items()):
+    out_dir = Path("output") / "backtests" / ride_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-estimator: 2x2 grid (ETA and speed in both distance and time space)
+    for name, result in results.items():
+        fig, axes = plt.subplots(2, 2, figsize=(20, 10))
         plot_delta(
             result,
-            f"{name} \u2014 {ride_name}",
-            ax=fig.add_subplot(gs[i, 0]),
+            "ETA error — distance",
+            ax=axes[0, 0],
             ride_df=df,
             warmup_pct=0.02,
+            x_axis="distance",
+        )
+        plot_delta(
+            result,
+            "ETA error — time",
+            ax=axes[0, 1],
+            ride_df=df,
+            warmup_pct=0.02,
+            x_axis="time",
         )
         plot_speed(
             result,
-            f"{name} \u2014 avg speed",
-            ax=fig.add_subplot(gs[i, 1]),
+            "Speed — distance",
+            ax=axes[1, 0],
             ride_df=df,
             warmup_pct=0.02,
+            x_axis="distance",
         )
+        plot_speed(
+            result,
+            "Speed — time",
+            ax=axes[1, 1],
+            ride_df=df,
+            warmup_pct=0.02,
+            x_axis="time",
+        )
+        fig.suptitle(f"{name} \u2014 {ride_name}", fontsize=13)
+        plt.tight_layout()
+        safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
+        plt.savefig(out_dir / f"{safe_name}.png", dpi=150)
+        plt.close()
+
+    # Per-route comparison (all estimators ETA)
+    fig, ax = plt.subplots(figsize=(14, 5))
     plot_comparison(
         results,
         f"All estimators \u2014 {ride_name}",
-        ax=fig.add_subplot(gs[n_est, :]),
+        ax=ax,
         ride_df=df,
         warmup_pct=0.02,
     )
-    out_dir = Path("output")
-    out_dir.mkdir(exist_ok=True)
     plt.tight_layout()
-    out = out_dir / f"backtest_{ride_name}.png"
-    plt.savefig(out, dpi=150)
+    plt.savefig(out_dir / "comparison.png", dpi=150)
     plt.close()
 
     row: dict = {

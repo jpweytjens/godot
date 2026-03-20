@@ -287,8 +287,9 @@ def plot_delta(
     ride_df: pd.DataFrame | None = None,
     warmup_pct: float | None = None,
     overlay: str | None = "gradient",
+    x_axis: str = "distance",
 ) -> None:
-    """Plot ETA error (delta = ETA - ATA) over distance.
+    """Plot ETA error (delta = ETA - ATA) over distance or elapsed time.
 
     Parameters
     ----------
@@ -301,32 +302,41 @@ def plot_delta(
     ride_df : pd.DataFrame, optional
         Original ride DataFrame. Required for any overlay.
     warmup_pct : float, optional
-        If set, hides data before this distance (km) to skip cold-start noise.
+        If set, hides data before this fraction of total distance.
     overlay : str or None, optional
-        Background overlay to draw. ``"gradient"`` (default) shows uphill/downhill
-        bands anchored at y=0; ``"elevation"`` shows the terrain silhouette
-        anchored at y=0; ``None`` disables the overlay.
+        Background overlay: ``"gradient"`` (default), ``"elevation"``, or
+        ``None``. Ignored when ``x_axis="time"`` (overlays are position-based).
+    x_axis : str, optional
+        ``"distance"`` (default) or ``"time"`` (elapsed minutes).
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 4))
 
-    # Draw primary content first so ylim is set before overlay reads it
     r = _clip(result, warmup_pct)
-    dist_km = r["distance_m"] / 1000
-    ax.plot(dist_km, r["delta_s"] / 60, color=TOL_VIBRANT[5], linewidth=1.2)
+    if x_axis == "time":
+        t0 = r["timestamp_ms"].iloc[0]
+        x = (r["timestamp_ms"] - t0) / 60_000
+        xlabel = "Elapsed time (min)"
+        effective_overlay = None  # overlays are position-based
+    else:
+        x = r["distance_m"] / 1000
+        xlabel = "Distance (km)"
+        effective_overlay = overlay
+
+    ax.plot(x, r["delta_s"] / 60, color=TOL_VIBRANT[5], linewidth=1.2)
     ax.axhline(5, linestyle="--", color="#BBBBBB", linewidth=1, label="+5 min")
     ax.axhline(-5, linestyle="--", color="#BBBBBB", linewidth=1, label="\u22125 min")
     ax.axhline(0, linestyle="-", color="black", linewidth=0.5)
-    ax.set_xlabel("Distance (km)")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("ETA \u2212 ATA (min)")
     ax.set_title(title)
     ax.legend()
 
-    if ride_df is not None and overlay is not None:
+    if ride_df is not None and effective_overlay is not None:
         ride_clipped = _clip(ride_df, warmup_pct)
-        if overlay == "gradient":
+        if effective_overlay == "gradient":
             add_gradient_profile(ride_clipped, ax)
-        elif overlay == "elevation":
+        elif effective_overlay == "elevation":
             add_elevation_profile(ride_clipped, ax)
 
 
@@ -338,12 +348,12 @@ def plot_speed(
     warmup_pct: float | None = None,
     pause_kmh: float = 1.0,
     min_pause_s: float = 60.0,
+    x_axis: str = "time",
 ) -> None:
-    """Plot actual speed and estimator average speed over elapsed time.
+    """Plot actual speed and estimator average speed over elapsed time or distance.
 
-    X-axis is elapsed time (minutes) so that paused sections — which do not
-    advance distance — have proper width. Paused sections are highlighted as
-    semi-transparent TOL-blue bands.
+    Pause bands (time-space only) highlight sections where speed stays below
+    ``pause_kmh`` for at least ``min_pause_s`` seconds.
 
     Parameters
     ----------
@@ -361,37 +371,50 @@ def plot_speed(
         Speed threshold below which a point counts as stopped. Default 1.0.
     min_pause_s : float, optional
         Minimum pause duration (s) to draw a band. Default 60.
+    x_axis : str, optional
+        ``"time"`` (default, elapsed minutes) or ``"distance"`` (km).
+        Pause bands are only drawn in time space.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 4))
 
     r = _clip(result, warmup_pct)
-    t0_ms = r["timestamp_ms"].iloc[0]
-    elapsed_min = (r["timestamp_ms"] - t0_ms) / 60_000
+
+    if x_axis == "time":
+        t0_ms = r["timestamp_ms"].iloc[0]
+        x_est = (r["timestamp_ms"] - t0_ms) / 60_000
+        xlabel = "Elapsed time (min)"
+    else:
+        x_est = r["distance_m"] / 1000
+        xlabel = "Distance (km)"
 
     if ride_df is not None:
         ride_clipped = _clip(ride_df, warmup_pct)
-        t0_ride = ride_clipped["timestamp_ms"].iloc[0]
-        ride_elapsed_min = (ride_clipped["timestamp_ms"] - t0_ride) / 60_000
 
-        # Pause bands in time space — pauses have proper width here
-        is_slow = ride_clipped["speed_kmh"] < pause_kmh
-        run_id = (is_slow != is_slow.shift()).cumsum()
-        for _, group in ride_clipped[is_slow].groupby(run_id[is_slow]):
-            duration_s = (
-                group["timestamp_ms"].iloc[-1] - group["timestamp_ms"].iloc[0]
-            ) / 1000
-            if duration_s >= min_pause_s:
-                ax.axvspan(
-                    (group["timestamp_ms"].iloc[0] - t0_ride) / 60_000,
-                    (group["timestamp_ms"].iloc[-1] - t0_ride) / 60_000,
-                    alpha=0.2,
-                    color=TOL_BRIGHT[0],
-                    linewidth=0,
-                )
+        if x_axis == "time":
+            t0_ride = ride_clipped["timestamp_ms"].iloc[0]
+            x_ride = (ride_clipped["timestamp_ms"] - t0_ride) / 60_000
+
+            # Pause bands — only meaningful in time space
+            is_slow = ride_clipped["speed_kmh"] < pause_kmh
+            run_id = (is_slow != is_slow.shift()).cumsum()
+            for _, group in ride_clipped[is_slow].groupby(run_id[is_slow]):
+                duration_s = (
+                    group["timestamp_ms"].iloc[-1] - group["timestamp_ms"].iloc[0]
+                ) / 1000
+                if duration_s >= min_pause_s:
+                    ax.axvspan(
+                        (group["timestamp_ms"].iloc[0] - t0_ride) / 60_000,
+                        (group["timestamp_ms"].iloc[-1] - t0_ride) / 60_000,
+                        alpha=0.2,
+                        color=TOL_BRIGHT[0],
+                        linewidth=0,
+                    )
+        else:
+            x_ride = ride_clipped["distance_m"] / 1000
 
         ax.plot(
-            ride_elapsed_min,
+            x_ride,
             ride_clipped["speed_kmh"],
             color="black",
             linewidth=0.6,
@@ -400,14 +423,14 @@ def plot_speed(
         )
 
     ax.plot(
-        elapsed_min,
+        x_est,
         r["speed_ms"] * 3.6,
         color=TOL_VIBRANT[5],
         linewidth=1.2,
         label="Avg speed",
     )
 
-    ax.set_xlabel("Elapsed time (min)")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Speed (km/h)")
     ax.set_title(title)
     ax.legend()
