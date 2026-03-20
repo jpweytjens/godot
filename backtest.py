@@ -184,8 +184,9 @@ def run(
         "speed_smoothed": smooth_speed,
         "route_type": route_type,
     }
+    warmup_cutoff = df["distance_m"].iloc[-1] * 0.02
     for name, result in results.items():
-        trimmed = result[result["distance_m"] > 5000]["delta_s"].dropna()
+        trimmed = result[result["distance_m"] >= warmup_cutoff]["delta_s"].dropna()
         col = name.lower().replace(" ", "_")
         row[f"{col}_mae"] = trimmed.abs().mean() / 60
         row[f"{col}_rmse"] = (trimmed**2).mean() ** 0.5 / 60
