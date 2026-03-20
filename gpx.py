@@ -1,5 +1,6 @@
 """GPX file parsing and distance/speed pipe functions."""
 
+from functools import lru_cache
 from pathlib import Path
 
 import gpxpy
@@ -7,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 
+@lru_cache(maxsize=None)
 def read_gpx(path: Path) -> pd.DataFrame:
     """Parse a GPX file into a raw DataFrame.
 
