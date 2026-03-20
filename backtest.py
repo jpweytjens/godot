@@ -5,6 +5,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from tqdm import tqdm
 
 from benchmark import backtest
 from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
@@ -13,9 +14,9 @@ from plot import plot_comparison, plot_delta
 
 ESTIMATORS = {
     "AvgSpeed": AvgSpeedEstimator(),
-    "Rolling 1min": RollingAvgSpeedEstimator(window_s=60),
+    # "Rolling 1min": RollingAvgSpeedEstimator(window_s=60),
     "Rolling 5min": RollingAvgSpeedEstimator(window_s=300),
-    "Rolling 10min": RollingAvgSpeedEstimator(window_s=600),
+    # "Rolling 10min": RollingAvgSpeedEstimator(window_s=600),
     "Rolling 30min": RollingAvgSpeedEstimator(window_s=1800),
 }
 
@@ -98,11 +99,12 @@ def run(gpx_path: Path) -> dict:
         ride_df=df,
         warmup_km=5.0,
     )
+    out_dir = Path("output")
+    out_dir.mkdir(exist_ok=True)
     plt.tight_layout()
-    out = Path(f"backtest_{ride_name}.png")
+    out = out_dir / f"backtest_{ride_name}.png"
     plt.savefig(out, dpi=150)
     plt.close()
-    print(f"Saved {out}")
 
     row: dict = {"ride": ride_name, "route_type": route_type}
     for name, result in results.items():
@@ -121,8 +123,10 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    rows = [run(p) for p in paths]
-    results_df = pd.DataFrame(rows)
+    rows = [run(p) for p in tqdm(paths, desc="Backtesting", unit="ride")]
+    results_df = (
+        pd.DataFrame(rows).sort_values(["route_type", "ride"]).reset_index(drop=True)
+    )
 
     metric_cols = [
         c for c in results_df.columns if c.endswith("_mae") or c.endswith("_rmse")
