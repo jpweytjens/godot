@@ -66,6 +66,30 @@ def _clip(df: pd.DataFrame, warmup_pct: float | None) -> pd.DataFrame:
     return df[df["distance_m"] >= cutoff]
 
 
+def _draw_pause_bands(
+    ax: Axes,
+    ride_clipped: pd.DataFrame,
+    t0_ms: int,
+    pause_kmh: float,
+    min_pause_s: float,
+) -> None:
+    """Shade paused sections as full-height TOL-blue bands in time space."""
+    is_slow = ride_clipped["speed_kmh"] < pause_kmh
+    run_id = (is_slow != is_slow.shift()).cumsum()
+    for _, group in ride_clipped[is_slow].groupby(run_id[is_slow]):
+        duration_s = (
+            group["timestamp_ms"].iloc[-1] - group["timestamp_ms"].iloc[0]
+        ) / 1000
+        if duration_s >= min_pause_s:
+            ax.axvspan(
+                (group["timestamp_ms"].iloc[0] - t0_ms) / 60_000,
+                (group["timestamp_ms"].iloc[-1] - t0_ms) / 60_000,
+                alpha=0.2,
+                color=TOL_BRIGHT[0],
+                linewidth=0,
+            )
+
+
 def _align_twin_at(
     ax_primary: Axes,
     ax_twin: Axes,
@@ -323,6 +347,10 @@ def plot_delta(
         xlabel = "Distance (km)"
         effective_overlay = overlay
 
+    if ride_df is not None and x_axis == "time":
+        ride_clipped = _clip(ride_df, warmup_pct)
+        _draw_pause_bands(ax, ride_clipped, r["timestamp_ms"].iloc[0], 1.0, 60.0)
+
     ax.plot(x, r["delta_s"] / 60, color=TOL_VIBRANT[5], linewidth=1.2)
     ax.axhline(5, linestyle="--", color="#BBBBBB", linewidth=1, label="+5 min")
     ax.axhline(-5, linestyle="--", color="#BBBBBB", linewidth=1, label="\u22125 min")
@@ -394,22 +422,7 @@ def plot_speed(
         if x_axis == "time":
             t0_ride = ride_clipped["timestamp_ms"].iloc[0]
             x_ride = (ride_clipped["timestamp_ms"] - t0_ride) / 60_000
-
-            # Pause bands — only meaningful in time space
-            is_slow = ride_clipped["speed_kmh"] < pause_kmh
-            run_id = (is_slow != is_slow.shift()).cumsum()
-            for _, group in ride_clipped[is_slow].groupby(run_id[is_slow]):
-                duration_s = (
-                    group["timestamp_ms"].iloc[-1] - group["timestamp_ms"].iloc[0]
-                ) / 1000
-                if duration_s >= min_pause_s:
-                    ax.axvspan(
-                        (group["timestamp_ms"].iloc[0] - t0_ride) / 60_000,
-                        (group["timestamp_ms"].iloc[-1] - t0_ride) / 60_000,
-                        alpha=0.2,
-                        color=TOL_BRIGHT[0],
-                        linewidth=0,
-                    )
+            _draw_pause_bands(ax, ride_clipped, t0_ride, pause_kmh, min_pause_s)
         else:
             x_ride = ride_clipped["distance_m"] / 1000
 
