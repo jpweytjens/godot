@@ -3,9 +3,12 @@
 import sys
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
-from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
 
 from benchmark import backtest
 from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
@@ -154,7 +157,7 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    rows = [run(p) for p in tqdm(paths, desc="Backtesting", unit="ride")]
+    rows = process_map(run, paths, desc="Backtesting", unit="ride")
     results_df = (
         pd.DataFrame(rows).sort_values(["route_type", "ride"]).reset_index(drop=True)
     )
