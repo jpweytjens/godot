@@ -336,35 +336,62 @@ def plot_speed(
     ax: Axes | None = None,
     ride_df: pd.DataFrame | None = None,
     warmup_pct: float | None = None,
+    pause_kmh: float = 1.0,
+    min_pause_s: float = 60.0,
 ) -> None:
-    """Plot actual speed and estimator average speed over distance.
+    """Plot actual speed and estimator average speed over elapsed time.
+
+    X-axis is elapsed time (minutes) so that paused sections — which do not
+    advance distance — have proper width. Paused sections are highlighted as
+    semi-transparent TOL-blue bands.
 
     Parameters
     ----------
     result : pd.DataFrame
-        Output of backtest(), must include speed_ms column.
+        Output of backtest(), must include timestamp_ms and speed_ms columns.
     title : str
         Plot title.
     ax : Axes, optional
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
-        Original ride DataFrame with speed_kmh column for the actual speed line.
+        Original ride DataFrame with speed_kmh and timestamp_ms columns.
     warmup_pct : float, optional
         If set, hides data before this fraction of total distance.
+    pause_kmh : float, optional
+        Speed threshold below which a point counts as stopped. Default 1.0.
+    min_pause_s : float, optional
+        Minimum pause duration (s) to draw a band. Default 60.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 4))
 
     r = _clip(result, warmup_pct)
-    dist_km = r["distance_m"] / 1000
-    ax.plot(
-        dist_km, r["speed_ms"] * 3.6, color=COLORS[0], linewidth=1.2, label="Avg speed"
-    )
+    t0_ms = r["timestamp_ms"].iloc[0]
+    elapsed_min = (r["timestamp_ms"] - t0_ms) / 60_000
 
     if ride_df is not None:
         ride_clipped = _clip(ride_df, warmup_pct)
+        t0_ride = ride_clipped["timestamp_ms"].iloc[0]
+        ride_elapsed_min = (ride_clipped["timestamp_ms"] - t0_ride) / 60_000
+
+        # Pause bands in time space — pauses have proper width here
+        is_slow = ride_clipped["speed_kmh"] < pause_kmh
+        run_id = (is_slow != is_slow.shift()).cumsum()
+        for _, group in ride_clipped[is_slow].groupby(run_id[is_slow]):
+            duration_s = (
+                group["timestamp_ms"].iloc[-1] - group["timestamp_ms"].iloc[0]
+            ) / 1000
+            if duration_s >= min_pause_s:
+                ax.axvspan(
+                    (group["timestamp_ms"].iloc[0] - t0_ride) / 60_000,
+                    (group["timestamp_ms"].iloc[-1] - t0_ride) / 60_000,
+                    alpha=0.2,
+                    color=TOL_BRIGHT[0],
+                    linewidth=0,
+                )
+
         ax.plot(
-            ride_clipped["distance_m"] / 1000,
+            ride_elapsed_min,
             ride_clipped["speed_kmh"],
             color="black",
             linewidth=0.6,
@@ -372,7 +399,15 @@ def plot_speed(
             label="Actual",
         )
 
-    ax.set_xlabel("Distance (km)")
+    ax.plot(
+        elapsed_min,
+        r["speed_ms"] * 3.6,
+        color=TOL_VIBRANT[5],
+        linewidth=1.2,
+        label="Avg speed",
+    )
+
+    ax.set_xlabel("Elapsed time (min)")
     ax.set_ylabel("Speed (km/h)")
     ax.set_title(title)
     ax.legend()

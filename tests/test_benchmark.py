@@ -32,6 +32,7 @@ def test_backtest_columns():
     df = make_synthetic_ride()
     result = backtest(df, ConstantSpeedEstimator())
     assert list(result.columns) == [
+        "timestamp_ms",
         "distance_m",
         "speed_ms",
         "eta_remaining_s",

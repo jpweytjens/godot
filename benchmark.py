@@ -48,6 +48,7 @@ def backtest(df: pd.DataFrame, estimator: Estimator) -> pd.DataFrame:
     eta_s = remaining_m / speed_ms
     return pd.DataFrame(
         {
+            "timestamp_ms": df["timestamp_ms"].values,
             "distance_m": df["distance_m"].values,
             "speed_ms": speed_ms.values,
             "eta_remaining_s": eta_s.values,
