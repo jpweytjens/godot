@@ -49,6 +49,7 @@ def backtest(df: pd.DataFrame, estimator: Estimator) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "distance_m": df["distance_m"].values,
+            "speed_ms": speed_ms.values,
             "eta_remaining_s": eta_s.values,
             "ata_remaining_s": ata_s.values,
             "delta_s": (eta_s - ata_s).values,

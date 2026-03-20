@@ -330,6 +330,54 @@ def plot_delta(
             add_elevation_profile(ride_clipped, ax)
 
 
+def plot_speed(
+    result: pd.DataFrame,
+    title: str,
+    ax: Axes | None = None,
+    ride_df: pd.DataFrame | None = None,
+    warmup_pct: float | None = None,
+) -> None:
+    """Plot actual speed and estimator average speed over distance.
+
+    Parameters
+    ----------
+    result : pd.DataFrame
+        Output of backtest(), must include speed_ms column.
+    title : str
+        Plot title.
+    ax : Axes, optional
+        Axes to draw on. Creates a new figure if None.
+    ride_df : pd.DataFrame, optional
+        Original ride DataFrame with speed_kmh column for the actual speed line.
+    warmup_pct : float, optional
+        If set, hides data before this fraction of total distance.
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12, 4))
+
+    r = _clip(result, warmup_pct)
+    dist_km = r["distance_m"] / 1000
+    ax.plot(
+        dist_km, r["speed_ms"] * 3.6, color=COLORS[0], linewidth=1.2, label="Avg speed"
+    )
+
+    if ride_df is not None:
+        ride_clipped = _clip(ride_df, warmup_pct)
+        ax.plot(
+            ride_clipped["distance_m"] / 1000,
+            ride_clipped["speed_kmh"],
+            color="black",
+            linewidth=0.6,
+            alpha=0.4,
+            label="Actual",
+        )
+
+    ax.set_xlabel("Distance (km)")
+    ax.set_ylabel("Speed (km/h)")
+    ax.set_title(title)
+    ax.legend()
+
+
 def plot_comparison(
     results: dict[str, pd.DataFrame],
     title: str,

@@ -33,6 +33,7 @@ def test_backtest_columns():
     result = backtest(df, ConstantSpeedEstimator())
     assert list(result.columns) == [
         "distance_m",
+        "speed_ms",
         "eta_remaining_s",
         "ata_remaining_s",
         "delta_s",

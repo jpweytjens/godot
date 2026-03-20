@@ -17,7 +17,9 @@ from gpx import (
     add_smooth_speed,
     read_gpx,
 )
-from plot import plot_comparison, plot_delta
+from matplotlib.gridspec import GridSpec
+
+from plot import plot_comparison, plot_delta, plot_speed
 
 _N_INFO_COLS = 4  # ride, distance_method, speed_smoothed, route_type
 
@@ -61,10 +63,14 @@ _TABLE_STYLES = [
 ESTIMATORS = {
     "AvgSpeed (moving)": AvgSpeedEstimator(moving_only=True),
     "AvgSpeed (total)": AvgSpeedEstimator(moving_only=False),
-    # "Rolling 1min": RollingAvgSpeedEstimator(window_s=60),
-    "Rolling 5min": RollingAvgSpeedEstimator(window_s=300),
-    # "Rolling 10min": RollingAvgSpeedEstimator(window_s=600),
-    "Rolling 30min": RollingAvgSpeedEstimator(window_s=1800),
+    # "Rolling 1min (moving)": RollingAvgSpeedEstimator(window_s=60, moving_only=True),
+    # "Rolling 1min (total)": RollingAvgSpeedEstimator(window_s=60, moving_only=False),
+    "Rolling 5min (moving)": RollingAvgSpeedEstimator(window_s=300, moving_only=True),
+    "Rolling 5min (total)": RollingAvgSpeedEstimator(window_s=300, moving_only=False),
+    # "Rolling 10min (moving)": RollingAvgSpeedEstimator(window_s=600, moving_only=True),
+    # "Rolling 10min (total)": RollingAvgSpeedEstimator(window_s=600, moving_only=False),
+    "Rolling 30min (moving)": RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
+    "Rolling 30min (total)": RollingAvgSpeedEstimator(window_s=1800, moving_only=False),
 }
 
 
@@ -150,24 +156,27 @@ def run(
 
     n_est = len(ESTIMATORS)
     height_ratios = [3] * n_est + [5]
-    fig, axes = plt.subplots(
-        n_est + 1,
-        1,
-        figsize=(14, sum(height_ratios)),
-        gridspec_kw={"height_ratios": height_ratios},
-    )
+    fig = plt.figure(figsize=(28, sum(height_ratios)))
+    gs = GridSpec(n_est + 1, 2, figure=fig, height_ratios=height_ratios)
     for i, (name, result) in enumerate(results.items()):
         plot_delta(
             result,
             f"{name} \u2014 {ride_name}",
-            ax=axes[i],
+            ax=fig.add_subplot(gs[i, 0]),
+            ride_df=df,
+            warmup_pct=0.02,
+        )
+        plot_speed(
+            result,
+            f"{name} \u2014 avg speed",
+            ax=fig.add_subplot(gs[i, 1]),
             ride_df=df,
             warmup_pct=0.02,
         )
     plot_comparison(
         results,
         f"All estimators \u2014 {ride_name}",
-        ax=axes[-1],
+        ax=fig.add_subplot(gs[n_est, :]),
         ride_df=df,
         warmup_pct=0.02,
     )
