@@ -277,6 +277,20 @@ if __name__ == "__main__":
     print("\n--- Averages by route type ---")
     print(by_type_df.to_string(float_format="{:.2f}".format))
 
+    by_pipeline_df = (
+        results_df.groupby(["distance_method", "speed_smoothed"])[metric_cols]
+        .mean()
+        .rename(
+            columns={
+                **{c: f"{col_to_name[c[:-4]]} MAE" for c in mae_cols},
+                **{c: f"{col_to_name[c[:-5]]} RMSE" for c in rmse_cols},
+            }
+        )
+    )
+
+    print("\n--- Averages by pipeline ---")
+    print(by_pipeline_df.to_string(float_format="{:.2f}".format))
+
     # --- HTML output ---
     per_ride_html = (
         display_df.style.highlight_min(
@@ -301,6 +315,12 @@ if __name__ == "__main__":
         .set_caption("Averages by route type")
         .to_html()
     )
+    by_pipeline_html = (
+        by_pipeline_df.style.format("{:.2f}")
+        .set_table_styles(_TABLE_STYLES + sep_style)
+        .set_caption("Averages by pipeline (distance method × speed smoothing)")
+        .to_html()
+    )
 
     html_path = out_dir / "results.html"
     html_path.write_text(
@@ -312,6 +332,7 @@ if __name__ == "__main__":
         f"<h2>Per-ride metrics</h2>{per_ride_html}"
         f"<h2>Global averages</h2>{global_html}"
         f"<h2>Averages by route type</h2>{by_type_html}"
+        f"<h2>Averages by pipeline</h2>{by_pipeline_html}"
         "</body></html>"
     )
     print(f"Saved {html_path}")
