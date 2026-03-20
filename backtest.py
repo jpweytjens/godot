@@ -256,7 +256,7 @@ if __name__ == "__main__":
         )
         .highlight_min(axis=1, subset=pd.Index(display_rmse), props="font-weight: bold")
         .format({c: "{:.2f}" for c in display_metric})
-        .set_table_styles(_TABLE_STYLES + sep_style)  # type: ignore[arg-type]
+        .set_table_styles(_TABLE_STYLES + sep_style)
         .set_caption("ETA Estimator Backtest Results")
         .hide(axis="index")
     )

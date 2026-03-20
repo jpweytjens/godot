@@ -15,6 +15,10 @@
 - Also available: watts, hr, cad, atemp — ignore for now, useful for future versions.
 - Test file: `data/criquielion.gpx` (~18,777 points, 2025-08-23 ride).
 
+## Type hints
+- Use type hints for function signatures.
+- Do not add `# type: ignore` or contort code just to satisfy type errors from upstream library stubs (e.g. pandas, matplotlib). Those are stub quality issues, not our problem.
+
 ## Context
 This is a Python prototype for a gradient-aware cycling ETA estimator.
 The production target is a Kotlin extension — keep algorithm logic portable.
