@@ -6,9 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "gpxpy>=1.6.2",
+    "jinja2>=3.1.6",
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
-    "pandas>=3.0.1",
+    "pandas[excel,parquet,performance,xml]>=3.0.1",
     "scipy>=1.17.1",
     "tqdm>=4.67.3",
 ]

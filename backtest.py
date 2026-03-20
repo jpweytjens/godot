@@ -150,6 +150,8 @@ def run(
 
 
 if __name__ == "__main__":
+    from itertools import product
+
     paths = [Path(p) for p in sys.argv[1:]] or list(Path("data").glob("*.gpx"))
     if not paths:
         print(
@@ -157,21 +159,45 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    rows = process_map(run, paths, desc="Backtesting", unit="ride")
+    combos = list(product(paths, ["haversine", "integrated"], [True, False]))
+    rows = process_map(
+        run,
+        [c[0] for c in combos],
+        [c[1] for c in combos],
+        [c[2] for c in combos],
+        desc="Backtesting",
+        unit="run",
+    )
     results_df = (
-        pd.DataFrame(rows).sort_values(["route_type", "ride"]).reset_index(drop=True)
+        pd.DataFrame(rows)
+        .sort_values(["route_type", "ride", "distance_method", "speed_smoothed"])
+        .reset_index(drop=True)
     )
 
-    metric_cols = [
-        c for c in results_df.columns if c.endswith("_mae") or c.endswith("_rmse")
-    ]
+    col_to_name = {name.lower().replace(" ", "_"): name for name in ESTIMATORS}
+    info_cols = ["ride", "distance_method", "speed_smoothed", "route_type"]
+    mae_cols = [c for c in results_df.columns if c.endswith("_mae")]
+    rmse_cols = [c for c in results_df.columns if c.endswith("_rmse")]
+    metric_cols = mae_cols + rmse_cols
+
+    # Reorder: info | all MAE | all RMSE
+    results_df = results_df[info_cols + metric_cols]
 
     print("\n--- Per-ride metrics ---")
     print(results_df.to_string(index=False, float_format="{:.2f}".format))
 
-    col_to_name = {name.lower().replace(" ", "_"): name for name in ESTIMATORS}
-    mae_cols = [c for c in metric_cols if c.endswith("_mae")]
-    rmse_cols = [c for c in metric_cols if c.endswith("_rmse")]
+    out_dir = Path("output")
+    out_dir.mkdir(exist_ok=True)
+    styler = (
+        results_df.style.highlight_min(
+            axis=1, subset=pd.Index(mae_cols), props="font-weight: bold"
+        )
+        .highlight_min(axis=1, subset=pd.Index(rmse_cols), props="font-weight: bold")
+        .format({c: "{:.2f}" for c in metric_cols})
+    )
+    html_path = out_dir / "results.html"
+    styler.to_html(html_path)
+    print(f"Saved {html_path}")
     global_avg = pd.DataFrame(
         {
             "MAE": results_df[mae_cols].mean().rename(lambda c: col_to_name[c[:-4]]),
