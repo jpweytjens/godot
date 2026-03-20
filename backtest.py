@@ -1,6 +1,5 @@
 """Run ETA estimators against GPX files and report accuracy metrics."""
 
-import sys
 from pathlib import Path
 
 import matplotlib
@@ -194,16 +193,39 @@ def run(
 
 
 if __name__ == "__main__":
+    import argparse
     from itertools import product
 
-    paths = [Path(p) for p in sys.argv[1:]] or list(Path("data").glob("*.gpx"))
+    parser = argparse.ArgumentParser(description="ETA estimator backtest")
+    parser.add_argument(
+        "paths", nargs="*", type=Path, help="GPX files (default: data/*.gpx)"
+    )
+    parser.add_argument(
+        "--distance",
+        nargs="+",
+        choices=["haversine", "integrated"],
+        default=["integrated"],
+        metavar="METHOD",
+        help="Distance method(s) to use (default: integrated)",
+    )
+    parser.add_argument(
+        "--smoothing",
+        nargs="+",
+        choices=["on", "off"],
+        default=["off"],
+        metavar="ON|OFF",
+        help="Speed smoothing option(s) to include (default: off)",
+    )
+    args = parser.parse_args()
+
+    paths = args.paths or list(Path("data").glob("*.gpx"))
     if not paths:
-        print(
+        parser.error(
             "No GPX files found. Place .gpx files in data/ or pass paths as arguments."
         )
-        sys.exit(1)
 
-    combos = list(product(paths, ["haversine", "integrated"], [True, False]))
+    smooth_options = [s == "on" for s in args.smoothing]
+    combos = list(product(paths, args.distance, smooth_options))
     rows = process_map(
         run,
         [c[0] for c in combos],
