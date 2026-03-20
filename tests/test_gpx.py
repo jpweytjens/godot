@@ -1,6 +1,6 @@
 from pathlib import Path
 import pytest
-from eta import (
+from gpx import (
     read_gpx,
     add_haversine_distance,
     add_integrated_distance,

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from eta import (
+from gpx import (
     add_haversine_distance,
     add_integrated_distance,
     add_smooth_speed,

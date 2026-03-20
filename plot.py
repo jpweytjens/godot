@@ -54,6 +54,18 @@ COLORS = TOL_BRIGHT
 
 
 # ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _clip(df: pd.DataFrame, warmup_km: float | None) -> pd.DataFrame:
+    """Filter out rows before warmup_km from a backtest result or ride DataFrame."""
+    if warmup_km is None:
+        return df
+    return df[df["distance_m"] >= warmup_km * 1000]
+
+
+# ---------------------------------------------------------------------------
 # Overlay helpers
 # ---------------------------------------------------------------------------
 
@@ -141,8 +153,6 @@ def add_gradient_profile(
     dd = df["distance_m"].diff().replace(0, np.nan)
     raw_gradient_pct = (df["elevation_m"].diff() / dd * 100).fillna(0)
 
-    # Determine window in number of rows (assume ~1s recording = ~speed_ms rows per meter)
-    # Use a fixed row count based on median point spacing
     spacing_m = df["distance_m"].diff().median()
     window = max(1, int(smooth_m / spacing_m))
     gradient_pct = raw_gradient_pct.rolling(window, center=True, min_periods=1).mean()
@@ -185,6 +195,7 @@ def plot_backtest(
     title: str,
     ax: Axes | None = None,
     ride_df: pd.DataFrame | None = None,
+    warmup_km: float | None = None,
 ) -> None:
     """Plot predicted vs actual remaining time over distance.
 
@@ -198,26 +209,25 @@ def plot_backtest(
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
         Original ride DataFrame. If provided, adds elevation overlay.
+    warmup_km : float, optional
+        If set, hides data before this distance (km) to skip cold-start noise.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 4))
-    dist_km = result["distance_m"] / 1000
+    r = _clip(result, warmup_km)
+    dist_km = r["distance_m"] / 1000
     ax.plot(
-        dist_km,
-        result["ata_remaining_s"] / 60,
-        label="Actual",
-        color="black",
-        linewidth=1.5,
+        dist_km, r["ata_remaining_s"] / 60, label="Actual", color="black", linewidth=1.5
     )
     ax.plot(
         dist_km,
-        result["eta_remaining_s"] / 60,
+        r["eta_remaining_s"] / 60,
         label="Predicted",
         color=COLORS[0],
         alpha=0.85,
     )
     if ride_df is not None:
-        add_elevation_profile(ride_df, ax)
+        add_elevation_profile(_clip(ride_df, warmup_km), ax)
     ax.set_xlabel("Distance (km)")
     ax.set_ylabel("Remaining time (min)")
     ax.set_title(title)
@@ -229,6 +239,7 @@ def plot_delta(
     title: str,
     ax: Axes | None = None,
     ride_df: pd.DataFrame | None = None,
+    warmup_km: float | None = None,
 ) -> None:
     """Plot ETA error (delta = ETA - ATA) over distance.
 
@@ -242,19 +253,82 @@ def plot_delta(
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
         Original ride DataFrame. If provided, adds gradient overlay.
+    warmup_km : float, optional
+        If set, hides data before this distance (km) to skip cold-start noise.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 4))
-
     if ride_df is not None:
-        add_gradient_profile(ride_df, ax)
-
-    dist_km = result["distance_m"] / 1000
-    ax.plot(dist_km, result["delta_s"] / 60, color=COLORS[1], linewidth=1.2)
+        add_gradient_profile(_clip(ride_df, warmup_km), ax)
+    r = _clip(result, warmup_km)
+    dist_km = r["distance_m"] / 1000
+    ax.plot(dist_km, r["delta_s"] / 60, color=COLORS[1], linewidth=1.2)
     ax.axhline(5, linestyle="--", color="#BBBBBB", linewidth=1, label="+5 min")
-    ax.axhline(-5, linestyle="--", color="#BBBBBB", linewidth=1, label="-5 min")
+    ax.axhline(-5, linestyle="--", color="#BBBBBB", linewidth=1, label="\u22125 min")
     ax.axhline(0, linestyle="-", color="black", linewidth=0.5)
     ax.set_xlabel("Distance (km)")
     ax.set_ylabel("ETA \u2212 ATA (min)")
     ax.set_title(title)
     ax.legend()
+
+
+def plot_comparison(
+    results: dict[str, pd.DataFrame],
+    title: str,
+    ax: Axes | None = None,
+    ride_df: pd.DataFrame | None = None,
+    warmup_km: float | None = None,
+) -> None:
+    """Plot remaining time for multiple estimators on the same axes.
+
+    The actual remaining time (ATA) is shown as a black reference line.
+    Each estimator gets a distinct Paul Tol color.
+
+    Parameters
+    ----------
+    results : dict of str -> pd.DataFrame
+        Mapping of estimator name to backtest() output DataFrame.
+    title : str
+        Plot title.
+    ax : Axes, optional
+        Axes to draw on. Creates a new figure if None.
+    ride_df : pd.DataFrame, optional
+        Original ride DataFrame. If provided, adds elevation overlay.
+    warmup_km : float, optional
+        If set, hides data before this distance (km) to skip cold-start noise.
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 5))
+
+    if ride_df is not None:
+        add_elevation_profile(_clip(ride_df, warmup_km), ax)
+
+    # ATA reference — use any result for the actual line
+    first = _clip(next(iter(results.values())), warmup_km)
+    dist_km = first["distance_m"] / 1000
+    ax.plot(
+        dist_km,
+        first["ata_remaining_s"] / 60,
+        label="Actual",
+        color="black",
+        linewidth=2.0,
+        zorder=10,
+    )
+
+    # Use TOL_MUTED for many estimators, fall back to cycling if needed
+    palette = TOL_MUTED if len(results) > len(COLORS) else COLORS
+    for i, (name, result) in enumerate(results.items()):
+        r = _clip(result, warmup_km)
+        ax.plot(
+            r["distance_m"] / 1000,
+            r["eta_remaining_s"] / 60,
+            label=name,
+            color=palette[i % len(palette)],
+            alpha=0.85,
+            linewidth=1.2,
+        )
+
+    ax.set_xlabel("Distance (km)")
+    ax.set_ylabel("Remaining time (min)")
+    ax.set_title(title)
+    ax.legend(loc="upper right")

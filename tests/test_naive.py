@@ -1,5 +1,5 @@
 import numpy as np
-from eta import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
 
 
 class TestAvgSpeedEstimator:

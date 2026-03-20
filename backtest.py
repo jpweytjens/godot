@@ -6,14 +6,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from benchmark import backtest
-from eta import (
-    AvgSpeedEstimator,
-    RollingAvgSpeedEstimator,
-    add_haversine_distance,
-    add_smooth_speed,
-    read_gpx,
-)
-from plot import plot_backtest, plot_delta
+from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from gpx import add_haversine_distance, add_smooth_speed, read_gpx
+from plot import plot_backtest, plot_comparison, plot_delta
 
 
 def run(gpx_path: Path) -> None:
@@ -29,14 +24,37 @@ def run(gpx_path: Path) -> None:
 
     estimators = {
         "AvgSpeed": AvgSpeedEstimator(),
-        "RollingAvg (5min)": RollingAvgSpeedEstimator(),
+        "Rolling 1min": RollingAvgSpeedEstimator(window_s=60),
+        "Rolling 5min": RollingAvgSpeedEstimator(window_s=300),
+        "Rolling 10min": RollingAvgSpeedEstimator(window_s=600),
+        "Rolling 30min": RollingAvgSpeedEstimator(window_s=1800),
     }
 
-    fig, axes = plt.subplots(len(estimators), 2, figsize=(16, 4 * len(estimators)))
-    for i, (name, est) in enumerate(estimators.items()):
-        result = backtest(df, est)
-        plot_backtest(result, f"{name} \u2014 {ride_name}", ax=axes[i, 0], ride_df=df)
-        plot_delta(result, f"Delta \u2014 {name}", ax=axes[i, 1], ride_df=df)
+    results = {name: backtest(df, est) for name, est in estimators.items()}
+
+    fig, axes = plt.subplots(
+        len(estimators) + 1, 2, figsize=(16, 4 * (len(estimators) + 1))
+    )
+    for i, (name, result) in enumerate(results.items()):
+        plot_backtest(
+            result,
+            f"{name} \u2014 {ride_name}",
+            ax=axes[i, 0],
+            ride_df=df,
+            warmup_km=5.0,
+        )
+        plot_delta(
+            result, f"Delta \u2014 {name}", ax=axes[i, 1], ride_df=df, warmup_km=5.0
+        )
+
+    plot_comparison(
+        results,
+        f"All estimators \u2014 {ride_name}",
+        ax=axes[-1, 0],
+        ride_df=df,
+        warmup_km=5.0,
+    )
+    axes[-1, 1].set_visible(False)
 
     plt.tight_layout()
     out = Path(f"backtest_{ride_name}.png")
@@ -46,8 +64,7 @@ def run(gpx_path: Path) -> None:
 
     print(f"\n{'Estimator':<25} {'MAE (min)':>10} {'RMSE (min)':>10}")
     print("-" * 47)
-    for name, est in estimators.items():
-        result = backtest(df, est)
+    for name, result in results.items():
         trimmed = result[result["distance_m"] > 5000]["delta_s"].dropna()
         mae = trimmed.abs().mean() / 60
         rmse = (trimmed**2).mean() ** 0.5 / 60
