@@ -9,7 +9,12 @@ from tqdm import tqdm
 
 from benchmark import backtest
 from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
-from gpx import add_haversine_distance, add_smooth_speed, read_gpx
+from gpx import (
+    add_haversine_distance,
+    add_integrated_distance,
+    add_smooth_speed,
+    read_gpx,
+)
 from plot import plot_comparison, plot_delta
 
 ESTIMATORS = {
@@ -61,20 +66,41 @@ def classify_route(
     return "mountain"
 
 
-def run(gpx_path: Path) -> dict:
+_DISTANCE_PIPES = {
+    "haversine": add_haversine_distance,
+    "integrated": add_integrated_distance,
+}
+
+
+def run(
+    gpx_path: Path,
+    distance_method: str = "haversine",
+    smooth_speed: bool = True,
+) -> dict:
     """Run all estimators against a single GPX file, save plots, return metrics.
 
     Parameters
     ----------
     gpx_path : Path
         Path to the GPX file to backtest.
+    distance_method : str, optional
+        Distance pipeline to apply: ``"haversine"`` (default) or ``"integrated"``.
+    smooth_speed : bool, optional
+        Whether to apply the 5s rolling speed smoother. Default True.
 
     Returns
     -------
     dict
-        Row dict with keys: ride, route_type, and per-estimator MAE/RMSE columns.
+        Row dict with keys: ride, distance_method, speed_smoothed, route_type,
+        and per-estimator MAE/RMSE columns.
     """
-    df = read_gpx(gpx_path).pipe(add_haversine_distance).pipe(add_smooth_speed)
+    if distance_method not in _DISTANCE_PIPES:
+        raise ValueError(f"distance_method must be one of {list(_DISTANCE_PIPES)}")
+    df = read_gpx(gpx_path).pipe(_DISTANCE_PIPES[distance_method])
+    if smooth_speed:
+        df = add_smooth_speed(df)
+    else:
+        df = df.assign(speed_kmh=df["speed_ms"] * 3.6)
     ride_name = gpx_path.stem
     route_type = classify_route(df)
 
@@ -106,7 +132,12 @@ def run(gpx_path: Path) -> dict:
     plt.savefig(out, dpi=150)
     plt.close()
 
-    row: dict = {"ride": ride_name, "route_type": route_type}
+    row: dict = {
+        "ride": ride_name,
+        "distance_method": distance_method,
+        "speed_smoothed": smooth_speed,
+        "route_type": route_type,
+    }
     for name, result in results.items():
         trimmed = result[result["distance_m"] > 5000]["delta_s"].dropna()
         col = name.lower().replace(" ", "_")
