@@ -58,11 +58,12 @@ COLORS = TOL_BRIGHT
 # ---------------------------------------------------------------------------
 
 
-def _clip(df: pd.DataFrame, warmup_km: float | None) -> pd.DataFrame:
-    """Filter out rows before warmup_km from a backtest result or ride DataFrame."""
-    if warmup_km is None:
+def _clip(df: pd.DataFrame, warmup_pct: float | None) -> pd.DataFrame:
+    """Filter out the first warmup_pct fraction of a backtest result or ride DataFrame."""
+    if warmup_pct is None:
         return df
-    return df[df["distance_m"] >= warmup_km * 1000]
+    cutoff = df["distance_m"].iloc[-1] * warmup_pct
+    return df[df["distance_m"] >= cutoff]
 
 
 def _align_twin_at(
@@ -131,6 +132,9 @@ def add_elevation_profile(
     Axes
         The twin axes (can be ignored if no further customisation needed).
     """
+    if len(df) < 3:
+        return ax.twinx()
+
     ax2 = ax.twinx()
     ax.set_zorder(ax2.get_zorder() + 1)
     ax.patch.set_visible(False)
@@ -181,6 +185,9 @@ def add_gradient_profile(
     Axes
         The twin axes.
     """
+    if len(df) < 3:
+        return ax.twinx()
+
     dist_km = df["distance_m"] / 1000
 
     # Gradient in percent, smoothed over ~smooth_m meters
@@ -234,7 +241,7 @@ def plot_backtest(
     title: str,
     ax: Axes | None = None,
     ride_df: pd.DataFrame | None = None,
-    warmup_km: float | None = None,
+    warmup_pct: float | None = None,
 ) -> None:
     """Plot predicted vs actual remaining time over distance.
 
@@ -248,12 +255,12 @@ def plot_backtest(
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
         Original ride DataFrame. If provided, adds elevation overlay.
-    warmup_km : float, optional
+    warmup_pct : float, optional
         If set, hides data before this distance (km) to skip cold-start noise.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 4))
-    r = _clip(result, warmup_km)
+    r = _clip(result, warmup_pct)
     dist_km = r["distance_m"] / 1000
     ax.plot(
         dist_km, r["ata_remaining_s"] / 60, label="Actual", color="black", linewidth=1.5
@@ -266,7 +273,7 @@ def plot_backtest(
         alpha=0.85,
     )
     if ride_df is not None:
-        add_elevation_profile(_clip(ride_df, warmup_km), ax)
+        add_elevation_profile(_clip(ride_df, warmup_pct), ax)
     ax.set_xlabel("Distance (km)")
     ax.set_ylabel("Remaining time (min)")
     ax.set_title(title)
@@ -278,7 +285,7 @@ def plot_delta(
     title: str,
     ax: Axes | None = None,
     ride_df: pd.DataFrame | None = None,
-    warmup_km: float | None = None,
+    warmup_pct: float | None = None,
     overlay: str | None = "gradient",
 ) -> None:
     """Plot ETA error (delta = ETA - ATA) over distance.
@@ -293,7 +300,7 @@ def plot_delta(
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
         Original ride DataFrame. Required for any overlay.
-    warmup_km : float, optional
+    warmup_pct : float, optional
         If set, hides data before this distance (km) to skip cold-start noise.
     overlay : str or None, optional
         Background overlay to draw. ``"gradient"`` (default) shows uphill/downhill
@@ -304,7 +311,7 @@ def plot_delta(
         _, ax = plt.subplots(figsize=(12, 4))
 
     # Draw primary content first so ylim is set before overlay reads it
-    r = _clip(result, warmup_km)
+    r = _clip(result, warmup_pct)
     dist_km = r["distance_m"] / 1000
     ax.plot(dist_km, r["delta_s"] / 60, color=TOL_VIBRANT[5], linewidth=1.2)
     ax.axhline(5, linestyle="--", color="#BBBBBB", linewidth=1, label="+5 min")
@@ -316,7 +323,7 @@ def plot_delta(
     ax.legend()
 
     if ride_df is not None and overlay is not None:
-        ride_clipped = _clip(ride_df, warmup_km)
+        ride_clipped = _clip(ride_df, warmup_pct)
         if overlay == "gradient":
             add_gradient_profile(ride_clipped, ax)
         elif overlay == "elevation":
@@ -328,7 +335,7 @@ def plot_comparison(
     title: str,
     ax: Axes | None = None,
     ride_df: pd.DataFrame | None = None,
-    warmup_km: float | None = None,
+    warmup_pct: float | None = None,
 ) -> None:
     """Plot remaining time for multiple estimators on the same axes.
 
@@ -345,17 +352,17 @@ def plot_comparison(
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
         Original ride DataFrame. If provided, adds elevation overlay.
-    warmup_km : float, optional
+    warmup_pct : float, optional
         If set, hides data before this distance (km) to skip cold-start noise.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(14, 5))
 
     if ride_df is not None:
-        add_elevation_profile(_clip(ride_df, warmup_km), ax)
+        add_elevation_profile(_clip(ride_df, warmup_pct), ax)
 
     # ATA reference — use any result for the actual line
-    first = _clip(next(iter(results.values())), warmup_km)
+    first = _clip(next(iter(results.values())), warmup_pct)
     dist_km = first["distance_m"] / 1000
     ax.plot(
         dist_km,
@@ -369,7 +376,7 @@ def plot_comparison(
     # Use TOL_MUTED for many estimators, fall back to cycling if needed
     palette = TOL_MUTED if len(results) > len(COLORS) else COLORS
     for i, (name, result) in enumerate(results.items()):
-        r = _clip(result, warmup_km)
+        r = _clip(result, warmup_pct)
         ax.plot(
             r["distance_m"] / 1000,
             r["eta_remaining_s"] / 60,

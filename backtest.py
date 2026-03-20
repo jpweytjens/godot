@@ -158,14 +158,18 @@ def run(
     )
     for i, (name, result) in enumerate(results.items()):
         plot_delta(
-            result, f"{name} \u2014 {ride_name}", ax=axes[i], ride_df=df, warmup_km=5.0
+            result,
+            f"{name} \u2014 {ride_name}",
+            ax=axes[i],
+            ride_df=df,
+            warmup_pct=0.02,
         )
     plot_comparison(
         results,
         f"All estimators \u2014 {ride_name}",
         ax=axes[-1],
         ride_df=df,
-        warmup_km=5.0,
+        warmup_pct=0.02,
     )
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
@@ -250,32 +254,64 @@ if __name__ == "__main__":
         }
     ]
 
-    styler = (
-        display_df.style.highlight_min(
-            axis=1, subset=pd.Index(display_mae), props="font-weight: bold"
-        )
-        .highlight_min(axis=1, subset=pd.Index(display_rmse), props="font-weight: bold")
-        .format({c: "{:.2f}" for c in display_metric})
-        .set_table_styles(_TABLE_STYLES + sep_style)
-        .set_caption("ETA Estimator Backtest Results")
-        .hide(axis="index")
-    )
-    html_path = out_dir / "results.html"
-    styler.to_html(html_path)
-    print(f"Saved {html_path}")
     global_avg = pd.DataFrame(
         {
             "MAE": results_df[mae_cols].mean().rename(lambda c: col_to_name[c[:-4]]),
             "RMSE": results_df[rmse_cols].mean().rename(lambda c: col_to_name[c[:-5]]),
         }
     )
+    by_type_df = (
+        results_df.groupby("route_type")[metric_cols]
+        .mean()
+        .rename(
+            columns={
+                **{c: f"{col_to_name[c[:-4]]} MAE" for c in mae_cols},
+                **{c: f"{col_to_name[c[:-5]]} RMSE" for c in rmse_cols},
+            }
+        )
+    )
 
     print("\n--- Global averages ---")
     print(global_avg.to_string(float_format="{:.2f}".format))
 
     print("\n--- Averages by route type ---")
-    print(
-        results_df.groupby("route_type")[metric_cols]
-        .mean()
-        .to_string(float_format="{:.2f}".format)
+    print(by_type_df.to_string(float_format="{:.2f}".format))
+
+    # --- HTML output ---
+    per_ride_html = (
+        display_df.style.highlight_min(
+            axis=1, subset=pd.Index(display_mae), props="font-weight: bold"
+        )
+        .highlight_min(axis=1, subset=pd.Index(display_rmse), props="font-weight: bold")
+        .format({c: "{:.2f}" for c in display_metric})
+        .set_table_styles(_TABLE_STYLES + sep_style)
+        .set_caption("Per-ride metrics")
+        .hide(axis="index")
+        .to_html()
     )
+    global_html = (
+        global_avg.style.format("{:.2f}")
+        .set_table_styles(_TABLE_STYLES)
+        .set_caption("Global averages")
+        .to_html()
+    )
+    by_type_html = (
+        by_type_df.style.format("{:.2f}")
+        .set_table_styles(_TABLE_STYLES + sep_style)
+        .set_caption("Averages by route type")
+        .to_html()
+    )
+
+    html_path = out_dir / "results.html"
+    html_path.write_text(
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>"
+        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:2em;color:#222;}"
+        "h2{margin-top:2.5em;font-size:1.05em;color:#555;border-bottom:1px solid #ddd;padding-bottom:4px;}"
+        "</style></head><body>"
+        f"<h2>Per-ride metrics</h2>{per_ride_html}"
+        f"<h2>Global averages</h2>{global_html}"
+        f"<h2>Averages by route type</h2>{by_type_html}"
+        "</body></html>"
+    )
+    print(f"Saved {html_path}")
