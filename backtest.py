@@ -166,8 +166,18 @@ if __name__ == "__main__":
     print("\n--- Per-ride metrics ---")
     print(results_df.to_string(index=False, float_format="{:.2f}".format))
 
+    col_to_name = {name.lower().replace(" ", "_"): name for name in ESTIMATORS}
+    mae_cols = [c for c in metric_cols if c.endswith("_mae")]
+    rmse_cols = [c for c in metric_cols if c.endswith("_rmse")]
+    global_avg = pd.DataFrame(
+        {
+            "MAE": results_df[mae_cols].mean().rename(lambda c: col_to_name[c[:-4]]),
+            "RMSE": results_df[rmse_cols].mean().rename(lambda c: col_to_name[c[:-5]]),
+        }
+    )
+
     print("\n--- Global averages ---")
-    print(results_df[metric_cols].mean().to_string(float_format="{:.2f}".format))
+    print(global_avg.to_string(float_format="{:.2f}".format))
 
     print("\n--- Averages by route type ---")
     print(
