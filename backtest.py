@@ -21,7 +21,7 @@ from matplotlib.gridspec import GridSpec
 
 from plot import plot_comparison, plot_delta, plot_speed
 
-_N_INFO_COLS = 4  # ride, distance_method, speed_smoothed, route_type
+_N_INFO_COLS = 5  # ride, distance_method, speed_smoothed, route_type, contains_pauses
 
 _TABLE_STYLES = [
     # Booktabs-style outer rules + clean font
@@ -114,6 +114,39 @@ def classify_route(
     return "mountain"
 
 
+def has_pauses(
+    df: pd.DataFrame,
+    pause_kmh: float = 1.0,
+    min_pause_s: float = 60.0,
+) -> bool:
+    """Return True if the ride contains at least one pause long enough to matter.
+
+    A pause is a consecutive run of points where speed is below ``pause_kmh``.
+    Only runs lasting at least ``min_pause_s`` seconds are counted.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Ride DataFrame with speed_kmh and timestamp_ms columns.
+    pause_kmh : float, optional
+        Speed threshold below which a point is considered stopped. Default 1.0.
+    min_pause_s : float, optional
+        Minimum duration (seconds) for a slow run to count as a pause. Default 60.
+
+    Returns
+    -------
+    bool
+    """
+    is_slow = df["speed_kmh"] < pause_kmh
+    run_id = (is_slow != is_slow.shift()).cumsum()
+    slow_durations = (
+        df[is_slow]
+        .groupby(run_id[is_slow])["timestamp_ms"]
+        .agg(lambda t: (t.iloc[-1] - t.iloc[0]) / 1000)
+    )
+    return bool(len(slow_durations) > 0 and slow_durations.max() >= min_pause_s)
+
+
 _DISTANCE_PIPES = {
     "haversine": add_haversine_distance,
     "integrated": add_integrated_distance,
@@ -192,6 +225,7 @@ def run(
         "distance_method": distance_method,
         "speed_smoothed": smooth_speed,
         "route_type": route_type,
+        "contains_pauses": has_pauses(df),
     }
     warmup_cutoff = df["distance_m"].iloc[-1] * 0.02
     for name, result in results.items():
@@ -251,7 +285,13 @@ if __name__ == "__main__":
     )
 
     col_to_name = {name.lower().replace(" ", "_"): name for name in ESTIMATORS}
-    info_cols = ["ride", "distance_method", "speed_smoothed", "route_type"]
+    info_cols = [
+        "ride",
+        "distance_method",
+        "speed_smoothed",
+        "route_type",
+        "contains_pauses",
+    ]
     mae_cols = [c for c in results_df.columns if c.endswith("_mae")]
     rmse_cols = [c for c in results_df.columns if c.endswith("_rmse")]
     metric_cols = mae_cols + rmse_cols
@@ -270,6 +310,7 @@ if __name__ == "__main__":
         "distance_method": "Distance",
         "speed_smoothed": "Smoothed",
         "route_type": "Type",
+        "contains_pauses": "Pauses",
         **{c: f"{col_to_name[c[:-4]]} MAE" for c in mae_cols},
         **{c: f"{col_to_name[c[:-5]]} RMSE" for c in rmse_cols},
     }
