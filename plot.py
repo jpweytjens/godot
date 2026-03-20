@@ -65,6 +65,36 @@ def _clip(df: pd.DataFrame, warmup_km: float | None) -> pd.DataFrame:
     return df[df["distance_m"] >= warmup_km * 1000]
 
 
+def _align_twin_at(
+    ax_primary: Axes,
+    ax_twin: Axes,
+    twin_ref: float,
+    primary_ref: float,
+    twin_hi: float,
+) -> None:
+    """Set twin axis ylim so twin_ref maps to the same chart position as primary_ref.
+
+    Parameters
+    ----------
+    ax_primary : Axes
+        Primary axes whose ylim determines the reference position.
+    ax_twin : Axes
+        Twin axes whose ylim will be adjusted.
+    twin_ref : float
+        The twin-axis value that should land on primary_ref's chart position.
+    primary_ref : float
+        The primary-axis value whose chart position we are targeting.
+    twin_hi : float
+        The desired upper limit of the twin axis.
+    """
+    lo, hi = ax_primary.get_ylim()
+    if hi == lo:
+        return
+    frac = np.clip((primary_ref - lo) / (hi - lo), 0.05, 0.95)
+    twin_lo = (twin_ref - frac * twin_hi) / (1.0 - frac)
+    ax_twin.set_ylim(twin_lo, twin_hi)
+
+
 # ---------------------------------------------------------------------------
 # Overlay helpers
 # ---------------------------------------------------------------------------
@@ -102,16 +132,19 @@ def add_elevation_profile(
         The twin axes (can be ignored if no further customisation needed).
     """
     ax2 = ax.twinx()
+    ax.set_zorder(ax2.get_zorder() + 1)
+    ax.patch.set_visible(False)
+
     dist_km = df["distance_m"] / 1000
     elev = df["elevation_m"]
 
-    ax2.fill_between(dist_km, elev, alpha=alpha, color=color, linewidth=0)
+    ax2.fill_between(dist_km, elev, elev.min(), alpha=alpha, color=color, linewidth=0)
     ax2.set_yticks([])
     for spine in ax2.spines.values():
         spine.set_visible(False)
 
-    # Push profile to lower portion: set top of twin axis well above max elevation
-    ax2.set_ylim(elev.min(), elev.max() / height_fraction)
+    # Anchor the floor of the fill (elev.min()) to primary y=0
+    _align_twin_at(ax, ax2, elev.min(), 0.0, elev.max() / height_fraction)
 
     return ax2
 
@@ -127,7 +160,8 @@ def add_gradient_profile(
 
     Gradient is computed from the elevation and distance columns, then
     smoothed with a rolling window to reduce GPS noise. Uphill sections
-    are filled with an orange-red, downhill with blue.
+    are filled with Paul Tol red, downhill with Paul Tol blue, both anchored
+    so the zero-gradient line aligns with y=0 on the primary axis.
 
     Parameters
     ----------
@@ -138,7 +172,7 @@ def add_gradient_profile(
     smooth_m : float, optional
         Rolling smoothing window in meters, by default 200.0.
     alpha : float, optional
-        Opacity of the fills, by default 0.2.
+        Opacity of the fills, by default 0.5.
     clamp_pct : float, optional
         Maximum gradient percentage shown (±), by default 15.0.
 
@@ -158,12 +192,15 @@ def add_gradient_profile(
     gradient_pct = raw_gradient_pct.rolling(window, center=True, min_periods=1).mean()
 
     ax2 = ax.twinx()
+    ax.set_zorder(ax2.get_zorder() + 1)
+    ax.patch.set_visible(False)
+
     ax2.fill_between(
         dist_km,
         gradient_pct,
         where=gradient_pct > 0,
         alpha=alpha,
-        color=TOL_VIBRANT[0],  # orange-red for uphill
+        color=TOL_VIBRANT[3],  # Paul Tol red for uphill
         linewidth=0,
         interpolate=True,
     )
@@ -172,15 +209,17 @@ def add_gradient_profile(
         gradient_pct,
         where=gradient_pct < 0,
         alpha=alpha,
-        color=TOL_BRIGHT[0],  # blue for downhill
+        color=TOL_BRIGHT[0],  # Paul Tol blue for downhill
         linewidth=0,
         interpolate=True,
     )
     ax2.axhline(0, color="#CCCCCC", linewidth=0.4, zorder=0)
-    ax2.set_ylim(-clamp_pct, clamp_pct)
     ax2.set_yticks([])
     for spine in ax2.spines.values():
         spine.set_visible(False)
+
+    # Anchor gradient y=0 to primary axis y=0
+    _align_twin_at(ax, ax2, 0.0, 0.0, clamp_pct)
 
     return ax2
 
@@ -240,6 +279,7 @@ def plot_delta(
     ax: Axes | None = None,
     ride_df: pd.DataFrame | None = None,
     warmup_km: float | None = None,
+    overlay: str | None = "gradient",
 ) -> None:
     """Plot ETA error (delta = ETA - ATA) over distance.
 
@@ -252,17 +292,21 @@ def plot_delta(
     ax : Axes, optional
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
-        Original ride DataFrame. If provided, adds gradient overlay.
+        Original ride DataFrame. Required for any overlay.
     warmup_km : float, optional
         If set, hides data before this distance (km) to skip cold-start noise.
+    overlay : str or None, optional
+        Background overlay to draw. ``"gradient"`` (default) shows uphill/downhill
+        bands anchored at y=0; ``"elevation"`` shows the terrain silhouette
+        anchored at y=0; ``None`` disables the overlay.
     """
     if ax is None:
         _, ax = plt.subplots(figsize=(12, 4))
-    if ride_df is not None:
-        add_gradient_profile(_clip(ride_df, warmup_km), ax)
+
+    # Draw primary content first so ylim is set before overlay reads it
     r = _clip(result, warmup_km)
     dist_km = r["distance_m"] / 1000
-    ax.plot(dist_km, r["delta_s"] / 60, color=COLORS[1], linewidth=1.2)
+    ax.plot(dist_km, r["delta_s"] / 60, color=TOL_VIBRANT[5], linewidth=1.2)
     ax.axhline(5, linestyle="--", color="#BBBBBB", linewidth=1, label="+5 min")
     ax.axhline(-5, linestyle="--", color="#BBBBBB", linewidth=1, label="\u22125 min")
     ax.axhline(0, linestyle="-", color="black", linewidth=0.5)
@@ -270,6 +314,13 @@ def plot_delta(
     ax.set_ylabel("ETA \u2212 ATA (min)")
     ax.set_title(title)
     ax.legend()
+
+    if ride_df is not None and overlay is not None:
+        ride_clipped = _clip(ride_df, warmup_km)
+        if overlay == "gradient":
+            add_gradient_profile(ride_clipped, ax)
+        elif overlay == "elevation":
+            add_elevation_profile(ride_clipped, ax)
 
 
 def plot_comparison(

@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from benchmark import backtest
 from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
 from gpx import add_haversine_distance, add_smooth_speed, read_gpx
-from plot import plot_backtest, plot_comparison, plot_delta
+from plot import plot_comparison, plot_delta
 
 
 def run(gpx_path: Path) -> None:
@@ -32,29 +32,26 @@ def run(gpx_path: Path) -> None:
 
     results = {name: backtest(df, est) for name, est in estimators.items()}
 
+    n_est = len(estimators)
+    height_ratios = [3] * n_est + [5]
     fig, axes = plt.subplots(
-        len(estimators) + 1, 2, figsize=(16, 4 * (len(estimators) + 1))
+        n_est + 1,
+        1,
+        figsize=(14, sum(height_ratios)),
+        gridspec_kw={"height_ratios": height_ratios},
     )
     for i, (name, result) in enumerate(results.items()):
-        plot_backtest(
-            result,
-            f"{name} \u2014 {ride_name}",
-            ax=axes[i, 0],
-            ride_df=df,
-            warmup_km=5.0,
-        )
         plot_delta(
-            result, f"Delta \u2014 {name}", ax=axes[i, 1], ride_df=df, warmup_km=5.0
+            result, f"{name} \u2014 {ride_name}", ax=axes[i], ride_df=df, warmup_km=5.0
         )
 
     plot_comparison(
         results,
         f"All estimators \u2014 {ride_name}",
-        ax=axes[-1, 0],
+        ax=axes[-1],
         ride_df=df,
         warmup_km=5.0,
     )
-    axes[-1, 1].set_visible(False)
 
     plt.tight_layout()
     out = Path(f"backtest_{ride_name}.png")
