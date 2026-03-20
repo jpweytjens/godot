@@ -1,6 +1,5 @@
 from typing import Protocol
 
-import matplotlib.pyplot as plt
 import pandas as pd
 
 
@@ -105,57 +104,3 @@ def backtest(df: pd.DataFrame, estimator: Estimator) -> pd.DataFrame:
         )
 
     return pd.DataFrame(records)
-
-
-def plot_backtest(result: pd.DataFrame, title: str, ax=None) -> None:
-    """Plot predicted vs actual remaining time over distance.
-
-    Parameters
-    ----------
-    result : pd.DataFrame
-        Output of backtest().
-    title : str
-        Plot title.
-    ax : matplotlib.axes.Axes, optional
-        Axes to draw on. Creates a new figure if None.
-    """
-    if ax is None:
-        _, ax = plt.subplots(figsize=(12, 4))
-    dist_km = result["distance_m"] / 1000
-    ax.plot(
-        dist_km,
-        result["ata_remaining_s"] / 60,
-        label="Actual",
-        color="black",
-        linewidth=1.5,
-    )
-    ax.plot(dist_km, result["eta_remaining_s"] / 60, label="Predicted", alpha=0.8)
-    ax.set_xlabel("Distance (km)")
-    ax.set_ylabel("Remaining time (min)")
-    ax.set_title(title)
-    ax.legend()
-
-
-def plot_delta(result: pd.DataFrame, title: str, ax=None) -> None:
-    """Plot ETA error (delta = ETA - ATA) over distance.
-
-    Parameters
-    ----------
-    result : pd.DataFrame
-        Output of backtest().
-    title : str
-        Plot title.
-    ax : matplotlib.axes.Axes, optional
-        Axes to draw on. Creates a new figure if None.
-    """
-    if ax is None:
-        _, ax = plt.subplots(figsize=(12, 4))
-    dist_km = result["distance_m"] / 1000
-    ax.plot(dist_km, result["delta_s"] / 60, color="crimson")
-    ax.axhline(5, linestyle="--", color="gray", linewidth=1, label="+5 min")
-    ax.axhline(-5, linestyle="--", color="gray", linewidth=1, label="-5 min")
-    ax.axhline(0, linestyle="-", color="black", linewidth=0.5)
-    ax.set_xlabel("Distance (km)")
-    ax.set_ylabel("ETA - ATA (min)")
-    ax.set_title(title)
-    ax.legend()

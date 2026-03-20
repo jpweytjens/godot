@@ -1,11 +1,11 @@
-"""Run naive ETA estimators against GPX files and report accuracy metrics."""
+"""Run ETA estimators against GPX files and report accuracy metrics."""
 
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from benchmark import backtest, plot_backtest, plot_delta
+from benchmark import backtest
 from eta import (
     AvgSpeedEstimator,
     RollingAvgSpeedEstimator,
@@ -13,6 +13,7 @@ from eta import (
     add_smooth_speed,
     read_gpx,
 )
+from plot import plot_backtest, plot_delta
 
 
 def run(gpx_path: Path) -> None:
@@ -32,10 +33,10 @@ def run(gpx_path: Path) -> None:
     }
 
     fig, axes = plt.subplots(len(estimators), 2, figsize=(16, 4 * len(estimators)))
-    for row, (name, est) in enumerate(estimators.items()):
+    for i, (name, est) in enumerate(estimators.items()):
         result = backtest(df, est)
-        plot_backtest(result, f"{name} — {ride_name}", ax=axes[row, 0])
-        plot_delta(result, f"Delta — {name}", ax=axes[row, 1])
+        plot_backtest(result, f"{name} \u2014 {ride_name}", ax=axes[i, 0], ride_df=df)
+        plot_delta(result, f"Delta \u2014 {name}", ax=axes[i, 1], ride_df=df)
 
     plt.tight_layout()
     out = Path(f"backtest_{ride_name}.png")
