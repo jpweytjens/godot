@@ -78,24 +78,31 @@ def backtest(
 def compute_metrics(
     result_df: pd.DataFrame, warmup_distance_m: float
 ) -> dict[str, float]:
-    """Compute MAE and RMSE for a single estimator backtest result.
+    """Compute accuracy metrics for a single estimator backtest result.
 
     Parameters
     ----------
     result_df : pd.DataFrame
-        Output of `backtest` with `distance_m` and `delta_s` columns.
+        Output of `backtest` with `distance_m`, `delta_s`, and
+        `ata_remaining_s` columns.
     warmup_distance_m : float
         Distance threshold; rows below this are excluded.
 
     Returns
     -------
     dict[str, float]
-        Keys: ``mae_min``, ``rmse_min`` (both in minutes).
+        Keys: ``mae_min``, ``rmse_min`` (minutes),
+        ``mpe_pct``, ``mape_pct`` (percentage).
     """
-    trimmed = result_df[result_df["distance_m"] >= warmup_distance_m][
-        "delta_s"
-    ].dropna()
+    trimmed = result_df[result_df["distance_m"] >= warmup_distance_m].dropna(
+        subset=["delta_s"]
+    )
+    delta = trimmed["delta_s"]
+    ata = trimmed["ata_remaining_s"]
+    relative = (delta / ata).where(ata > 0)
     return {
-        "mae_min": trimmed.abs().mean() / 60,
-        "rmse_min": (trimmed**2).mean() ** 0.5 / 60,
+        "mae_min": delta.abs().mean() / 60,
+        "rmse_min": (delta**2).mean() ** 0.5 / 60,
+        "mpe_pct": relative.mean() * 100,
+        "mape_pct": relative.abs().mean() * 100,
     }

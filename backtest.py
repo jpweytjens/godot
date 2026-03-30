@@ -190,6 +190,8 @@ def run(
         col = name.lower().replace(" ", "_")
         row[f"{col}_mae"] = metrics["mae_min"]
         row[f"{col}_rmse"] = metrics["rmse_min"]
+        row[f"{col}_mpe"] = metrics["mpe_pct"]
+        row[f"{col}_mape"] = metrics["mape_pct"]
     return row
 
 
@@ -223,6 +225,14 @@ if __name__ == "__main__":
         metavar="WINDOW",
         help="Rolling window size for speed smoothing (default: 5s)",
     )
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        choices=["mae", "rmse", "mpe", "mape"],
+        default=["mae", "mpe", "mape"],
+        metavar="METRIC",
+        help="Metrics to display (default: mae mpe mape)",
+    )
     args = parser.parse_args()
 
     paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
@@ -248,6 +258,15 @@ if __name__ == "__main__":
         .reset_index(drop=True)
     )
 
+    # --- Metric metadata ---
+    _METRIC_META = {
+        "mae": {"suffix": "_mae", "label": "MAE", "fmt": "{:.2f}"},
+        "rmse": {"suffix": "_rmse", "label": "RMSE", "fmt": "{:.2f}"},
+        "mpe": {"suffix": "_mpe", "label": "MPE%", "fmt": "{:.1f}"},
+        "mape": {"suffix": "_mape", "label": "MAPE%", "fmt": "{:.1f}"},
+    }
+    selected_metrics = args.metrics
+
     col_to_name = {name.lower().replace(" ", "_"): name for name in ESTIMATORS}
     info_cols = [
         "ride",
@@ -256,11 +275,14 @@ if __name__ == "__main__":
         "route_type",
         "contains_pauses",
     ]
-    mae_cols = [c for c in results_df.columns if c.endswith("_mae")]
-    rmse_cols = [c for c in results_df.columns if c.endswith("_rmse")]
-    metric_cols = mae_cols + rmse_cols
 
-    # Reorder: info | all MAE | all RMSE
+    # Collect columns per metric group, in display order
+    metric_groups: dict[str, list[str]] = {}
+    for m in selected_metrics:
+        suffix = _METRIC_META[m]["suffix"]
+        metric_groups[m] = [c for c in results_df.columns if c.endswith(suffix)]
+    metric_cols = [c for m in selected_metrics for c in metric_groups[m]]
+
     results_df = results_df[info_cols + metric_cols]
 
     print("\n--- Per-ride metrics ---")
@@ -269,44 +291,67 @@ if __name__ == "__main__":
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
 
-    rename_map = {
+    # --- Rename columns for display ---
+    rename_map: dict[str, str] = {
         "ride": "Ride",
         "distance_method": "Distance",
         "speed_smoothed": "Smoothed",
         "route_type": "Type",
         "contains_pauses": "Pauses",
-        **{c: f"{col_to_name[c[:-4]]} MAE" for c in mae_cols},
-        **{c: f"{col_to_name[c[:-5]]} RMSE" for c in rmse_cols},
     }
+    for m in selected_metrics:
+        meta = _METRIC_META[m]
+        for c in metric_groups[m]:
+            est_key = c[: -len(meta["suffix"])]
+            rename_map[c] = f"{col_to_name[est_key]} {meta['label']}"
+
     display_df = results_df.rename(columns=rename_map)
-    display_mae = [rename_map[c] for c in mae_cols]
-    display_rmse = [rename_map[c] for c in rmse_cols]
-    display_metric = display_mae + display_rmse
+    display_groups: dict[str, list[str]] = {
+        m: [rename_map[c] for c in metric_groups[m]] for m in selected_metrics
+    }
+    display_metric = [c for m in selected_metrics for c in display_groups[m]]
 
-    # Left border on first RMSE column to visually separate the two groups
-    first_rmse_pos = _N_INFO_COLS + len(display_mae) + 1  # nth-child is 1-indexed
-    sep_style = [
-        {
-            "selector": f"td:nth-child({first_rmse_pos}), th:nth-child({first_rmse_pos})",
-            "props": "border-left: 1px solid #ccc;",
-        }
-    ]
+    # Format map: minutes get 2 decimals, percentages get 1
+    fmt_map = {
+        c: _METRIC_META[m]["fmt"] for m in selected_metrics for c in display_groups[m]
+    }
 
-    global_avg = pd.DataFrame(
-        {
-            "MAE": results_df[mae_cols].mean().rename(lambda c: col_to_name[c[:-4]]),
-            "RMSE": results_df[rmse_cols].mean().rename(lambda c: col_to_name[c[:-5]]),
-        }
-    )
-    by_type_df = (
-        results_df.groupby("route_type")[metric_cols]
-        .mean()
-        .rename(
-            columns={
-                **{c: f"{col_to_name[c[:-4]]} MAE" for c in mae_cols},
-                **{c: f"{col_to_name[c[:-5]]} RMSE" for c in rmse_cols},
-            }
+    # Separator styles between metric groups
+    sep_styles: list[dict] = []
+    pos = _N_INFO_COLS + 1  # nth-child is 1-indexed
+    for i, m in enumerate(selected_metrics):
+        if i > 0:
+            sep_styles.append(
+                {
+                    "selector": f"td:nth-child({pos}), th:nth-child({pos})",
+                    "props": "border-left: 1px solid #ccc;",
+                }
+            )
+        pos += len(display_groups[m])
+
+    # --- Global averages (sorted by MAE if available) ---
+    global_data: dict[str, pd.Series] = {}
+    for m in selected_metrics:
+        meta = _METRIC_META[m]
+        cols = metric_groups[m]
+        global_data[meta["label"]] = (
+            results_df[cols]
+            .mean()
+            .rename(lambda c, s=meta["suffix"]: col_to_name[c[: -len(s)]])
         )
+    global_avg = pd.DataFrame(global_data)
+    sort_col = "MAE" if "mae" in selected_metrics else global_avg.columns[0]
+    global_avg = global_avg.sort_values(sort_col)
+
+    # --- By-route-type and by-pipeline aggregations ---
+    agg_rename = {c: rename_map[c] for c in metric_cols}
+    by_type_df = (
+        results_df.groupby("route_type")[metric_cols].mean().rename(columns=agg_rename)
+    )
+    by_pipeline_df = (
+        results_df.groupby(["distance_method", "speed_smoothed"])[metric_cols]
+        .mean()
+        .rename(columns=agg_rename)
     )
 
     print("\n--- Global averages ---")
@@ -315,47 +360,67 @@ if __name__ == "__main__":
     print("\n--- Averages by route type ---")
     print(by_type_df.to_string(float_format="{:.2f}".format))
 
-    by_pipeline_df = (
-        results_df.groupby(["distance_method", "speed_smoothed"])[metric_cols]
-        .mean()
-        .rename(
-            columns={
-                **{c: f"{col_to_name[c[:-4]]} MAE" for c in mae_cols},
-                **{c: f"{col_to_name[c[:-5]]} RMSE" for c in rmse_cols},
-            }
-        )
-    )
-
     print("\n--- Averages by pipeline ---")
     print(by_pipeline_df.to_string(float_format="{:.2f}".format))
 
-    # --- HTML output ---
+    # --- Highlighting helpers ---
+    _BOLD = "font-weight: bold"
+
+    def _highlight_min_all(s: pd.Series) -> list[str]:
+        """Bold all values that equal the row/column minimum."""
+        return [_BOLD if v == s.min() else "" for v in s]
+
+    def _highlight_min_abs_all(s: pd.Series) -> list[str]:
+        """Bold all values closest to zero (for signed metrics like MPE)."""
+        return [_BOLD if abs(v) == s.abs().min() else "" for v in s]
+
+    # --- HTML: per-ride table ---
+    styler = display_df.style
+    for m in selected_metrics:
+        cols = pd.Index(display_groups[m])
+        if m == "mpe":
+            styler = styler.apply(_highlight_min_abs_all, axis=1, subset=cols)
+        else:
+            styler = styler.apply(_highlight_min_all, axis=1, subset=cols)
     per_ride_html = (
-        display_df.style.highlight_min(
-            axis=1, subset=pd.Index(display_mae), props="font-weight: bold"
-        )
-        .highlight_min(axis=1, subset=pd.Index(display_rmse), props="font-weight: bold")
-        .format({c: "{:.2f}" for c in display_metric})
-        .set_table_styles(_TABLE_STYLES + sep_style)
+        styler.format(fmt_map)
+        .set_table_styles(_TABLE_STYLES + sep_styles)
         .set_caption("Per-ride metrics")
         .hide(axis="index")
         .to_html()
     )
+
+    # --- HTML: global averages (highlight best per column) ---
+    global_fmt = {
+        _METRIC_META[m]["label"]: _METRIC_META[m]["fmt"] for m in selected_metrics
+    }
+    global_styler = global_avg.style
+    for m in selected_metrics:
+        label = _METRIC_META[m]["label"]
+        if m == "mpe":
+            global_styler = global_styler.apply(
+                _highlight_min_abs_all, axis=0, subset=[label]
+            )
+        else:
+            global_styler = global_styler.apply(
+                _highlight_min_all, axis=0, subset=[label]
+            )
     global_html = (
-        global_avg.style.format("{:.2f}")
+        global_styler.format(global_fmt)
         .set_table_styles(_TABLE_STYLES)
         .set_caption("Global averages")
         .to_html()
     )
+
     by_type_html = (
-        by_type_df.style.format("{:.2f}")
-        .set_table_styles(_TABLE_STYLES + sep_style)
+        by_type_df.style.format(fmt_map)
+        .set_table_styles(_TABLE_STYLES + sep_styles)
         .set_caption("Averages by route type")
         .to_html()
     )
     by_pipeline_html = (
-        by_pipeline_df.style.format("{:.2f}")
-        .set_table_styles(_TABLE_STYLES + sep_style)
+        by_pipeline_df.style.format(fmt_map)
+        .set_table_styles(_TABLE_STYLES + sep_styles)
         .set_caption("Averages by pipeline (distance method × speed smoothing)")
         .to_html()
     )
