@@ -44,6 +44,13 @@ class AvgSpeedEstimator(BaseEstimator):
     def __init__(self, moving_only: bool = True) -> None:
         self._moving_only = moving_only
 
+    def __str__(self) -> str:
+        mode = "moving" if self._moving_only else "elapsed"
+        return f"avg speed ({mode} time)"
+
+    def __repr__(self) -> str:
+        return f"AvgSpeedEstimator(moving_only={self._moving_only!r})"
+
     def predict(self, ride: Ride) -> pd.Series:
         df = ride.df
         dd = df["delta_distance"]
@@ -74,6 +81,16 @@ class RollingAvgSpeedEstimator(BaseEstimator):
     ) -> None:
         self._window_s = ROLLING_WINDOW_S if window_s is None else window_s
         self._moving_only = moving_only
+
+    def __str__(self) -> str:
+        mode = "moving" if self._moving_only else "elapsed"
+        return f"rolling avg speed ({int(self._window_s)}s, {mode} time)"
+
+    def __repr__(self) -> str:
+        return (
+            f"RollingAvgSpeedEstimator(window_s={self._window_s!r}, "
+            f"moving_only={self._moving_only!r})"
+        )
 
     def predict(self, ride: Ride) -> pd.Series:
         df = ride.df

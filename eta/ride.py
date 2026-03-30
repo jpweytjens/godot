@@ -67,6 +67,21 @@ class Ride:
     ride_time: float
     paused_time: float
 
+    def __str__(self) -> str:
+        dist_km = self.distance / 1000
+        ride_min = self.ride_time / 60
+        return (
+            f"{self.label} — {dist_km:.1f} km, {ride_min:.0f} min ({self.route_type})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"Ride(name={self.name!r}, distance={self.distance:.0f}, "
+            f"route_type={self.route_type!r}, "
+            f"distance_method={self.distance_method!r}, "
+            f"points={len(self.df)})"
+        )
+
 
 def classify_route(
     df: pd.DataFrame,
