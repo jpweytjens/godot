@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -20,6 +19,7 @@ from eta.gpx import (
     read_gpx,
 )
 from eta.plot import prep_time_axis
+from tqdm.contrib.concurrent import process_map
 
 _PARSERS = {
     ".gpx": read_gpx,
@@ -238,56 +238,35 @@ def load_ride(
 def compute_global_prior(
     gpx_paths: Sequence[Path],
     distance_method: str = "integrated",
-    cache_dir: Path = Path("output"),
 ) -> float:
     """Global average moving speed (m/s) across rides.
 
     Computed as total_distance / total_moving_time — longer rides
     contribute proportionally more, giving an honest distance-weighted
-    average. Result is cached to disk and only recomputed when the set
-    of GPX files changes.
+    average. Rides are loaded in parallel with a progress bar.
 
     Parameters
     ----------
     gpx_paths : Sequence[Path]
-        GPX files to include.
+        GPX/FIT files to include.
     distance_method : str, optional
         Distance pipeline. Default ``"integrated"``.
-    cache_dir : Path, optional
-        Directory for the cache file. Default ``output/``.
 
     Returns
     -------
     float
         Speed in m/s.
     """
-    cache_path = cache_dir / ".prior_cache.json"
-    key = {str(p.name): p.stat().st_mtime for p in sorted(gpx_paths)}
-
-    if cache_path.exists():
-        cached = json.loads(cache_path.read_text())
-        if (
-            cached.get("key") == key
-            and cached.get("distance_method") == distance_method
-        ):
-            prior = cached["prior_ms"]
-            logger.info(
-                f"Global prior (cached): {prior:.2f} m/s ({prior * 3.6:.1f} km/h)"
-            )
-
-            return prior
-
-    total_dist = 0.0
-    total_move_time = 0.0
-    for path in gpx_paths:
-        ride = load_ride(path, distance_method, smooth_speed=False)
-        total_dist += ride.distance
-        total_move_time += ride.ride_time
-    prior = total_dist / total_move_time
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
-        json.dumps({"key": key, "distance_method": distance_method, "prior_ms": prior})
+    rides = process_map(
+        load_ride,
+        gpx_paths,
+        [distance_method] * len(gpx_paths),
+        [False] * len(gpx_paths),
+        desc="Loading rides",
+        unit="file",
     )
+    total_dist = sum(r.distance for r in rides)
+    total_move_time = sum(r.ride_time for r in rides)
+    prior = total_dist / total_move_time
     logger.info(f"Global prior: {prior:.2f} m/s ({prior * 3.6:.1f} km/h)")
     return prior
