@@ -5,7 +5,12 @@ from eta.estimators import AvgSpeedEstimator, BaseEstimator, RollingAvgSpeedEsti
 from eta.gpx import (
     read_gpx,
 )
-from eta.plot import comparison_errors, eta_error, speed_actual, speed_estimated
+from eta.plot import (
+    comparison_errors,
+    eta_countdown,
+    eta_error,
+    speed_comparison,
+)
 from eta.ride import Ride, load_ride
 
 __all__ = [
@@ -22,8 +27,8 @@ __all__ = [
     "backtest",
     "compute_metrics",
     # plot
-    "speed_actual",
-    "speed_estimated",
+    "eta_countdown",
     "eta_error",
+    "speed_comparison",
     "comparison_errors",
 ]

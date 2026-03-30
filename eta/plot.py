@@ -125,6 +125,61 @@ def error_refs() -> alt.Chart:
     return zero + bounds
 
 
+def eta_countdown(result_df: pd.DataFrame) -> alt.Chart:
+    """Estimated and actual time remaining, in minutes."""
+    combined = pd.concat(
+        [
+            result_df[["elapsed_min"]].assign(
+                remaining_min=result_df["ata_remaining_s"] / 60, series="Actual"
+            ),
+            result_df[["elapsed_min"]].assign(
+                remaining_min=result_df["eta_remaining_s"] / 60, series="Estimated"
+            ),
+        ],
+        ignore_index=True,
+    )
+    return (
+        alt.Chart(combined)
+        .mark_line(strokeWidth=1.2)
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("remaining_min:Q").title("Time remaining (min)"),
+            color=alt.Color("series:N")
+            .scale(domain=["Actual", "Estimated"], range=["#888", TOL_VIBRANT[5]])
+            .legend(alt.Legend(title=None, orient="top-right")),
+        )
+    )
+
+
+def speed_comparison(ride_df: pd.DataFrame, result_df: pd.DataFrame) -> alt.Chart:
+    """Actual vs estimated speed with legend."""
+    est_df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
+    combined = pd.concat(
+        [
+            ride_df[["elapsed_min", "speed_kmh"]].assign(series="Actual"),
+            est_df[["elapsed_min", "speed_kmh"]].assign(series="Estimated"),
+        ],
+        ignore_index=True,
+    )
+    return (
+        alt.Chart(combined)
+        .mark_line(strokeWidth=1)
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("speed_kmh:Q").title("Speed (km/h)"),
+            color=alt.Color("series:N")
+            .scale(domain=["Actual", "Estimated"], range=["#888", TOL_VIBRANT[5]])
+            .legend(alt.Legend(title=None, orient="top-right")),
+            opacity=alt.Opacity("series:N")
+            .scale(domain=["Actual", "Estimated"], range=[0.4, 1.0])
+            .legend(None),
+            strokeWidth=alt.StrokeWidth("series:N")
+            .scale(domain=["Actual", "Estimated"], range=[0.6, 1.5])
+            .legend(None),
+        )
+    )
+
+
 def comparison_errors(
     results: dict[str, pd.DataFrame], warmup_pct: float | None = None
 ) -> alt.Chart:
