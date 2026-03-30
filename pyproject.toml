@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "gpxpy>=1.6.2",
     "jinja2>=3.1.6",
+    "jupyter>=1.1.1",
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
     "pandas[excel,parquet,performance,xml]>=3.0.1",
