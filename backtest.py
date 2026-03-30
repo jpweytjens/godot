@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import altair as alt
 import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
@@ -19,7 +16,16 @@ from eta.gpx import (
     read_gpx,
 )
 
-from eta.plot import plot_comparison, plot_delta, plot_speed
+from eta.plot import (
+    comparison_errors,
+    error_refs,
+    eta_error,
+    pause_bands,
+    pause_intervals,
+    prep_time_axis,
+    speed_actual,
+    speed_estimated,
+)
 
 _N_INFO_COLS = 5  # ride, distance_method, speed_smoothed, route_type, contains_pauses
 
@@ -186,59 +192,43 @@ def run(
     out_dir = Path("output") / "backtests" / ride_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Per-estimator: 2x2 grid (ETA and speed in both distance and time space)
-    for name, result in results.items():
-        fig, axes = plt.subplots(2, 2, figsize=(20, 10))
-        plot_delta(
-            result,
-            "ETA error — distance",
-            ax=axes[0, 0],
-            ride_df=df,
-            warmup_pct=0.02,
-            x_axis="distance",
-        )
-        plot_delta(
-            result,
-            "ETA error — time",
-            ax=axes[0, 1],
-            ride_df=df,
-            warmup_pct=0.02,
-            x_axis="time",
-        )
-        plot_speed(
-            result,
-            "Speed — distance",
-            ax=axes[1, 0],
-            ride_df=df,
-            warmup_pct=0.02,
-            x_axis="distance",
-        )
-        plot_speed(
-            result,
-            "Speed — time",
-            ax=axes[1, 1],
-            ride_df=df,
-            warmup_pct=0.02,
-            x_axis="time",
-        )
-        fig.suptitle(f"{name} \u2014 {ride_name}", fontsize=13)
-        plt.tight_layout()
-        safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
-        plt.savefig(out_dir / f"{safe_name}.png", dpi=150)
-        plt.close()
+    # Prepare shared data for plotting
+    ride_prepped = prep_time_axis(df, warmup_pct=0.02)
+    pauses = pause_intervals(ride_prepped)
 
-    # Per-route comparison (all estimators ETA)
-    fig, ax = plt.subplots(figsize=(14, 5))
-    plot_comparison(
-        results,
-        f"All estimators \u2014 {ride_name}",
-        ax=ax,
-        ride_df=df,
-        warmup_pct=0.02,
+    # Per-estimator: 1x2 (ETA error | speed), time domain
+    for name, result in results.items():
+        result_prepped = prep_time_axis(result, warmup_pct=0.02)
+
+        error_chart = alt.layer(
+            pause_bands(pauses),
+            eta_error(result_prepped),
+            error_refs(),
+        ).properties(title="ETA error", width=500, height=250)
+
+        speed_chart = alt.layer(
+            pause_bands(pauses),
+            speed_actual(ride_prepped),
+            speed_estimated(result_prepped),
+        ).properties(title="Speed", width=500, height=250)
+
+        chart = (error_chart | speed_chart).properties(
+            title=alt.Title(f"{name} \u2014 {ride_name}")
+        )
+        safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
+        chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
+
+    # Comparison: all estimators' ETA error on one chart
+    comp_chart = alt.layer(
+        pause_bands(pauses),
+        comparison_errors(results, warmup_pct=0.02),
+        error_refs(),
+    ).properties(
+        title=alt.Title(f"All estimators \u2014 {ride_name}"),
+        width=900,
+        height=350,
     )
-    plt.tight_layout()
-    plt.savefig(out_dir / "comparison.png", dpi=150)
-    plt.close()
+    comp_chart.save(str(out_dir / "comparison.png"), scale_factor=2)
 
     row: dict = {
         "ride": ride_name,
