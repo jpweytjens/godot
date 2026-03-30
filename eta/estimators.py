@@ -98,7 +98,9 @@ class RollingAvgSpeedEstimator(BaseEstimator):
     ) -> None:
         self._window_s = ROLLING_WINDOW_S if window_s is None else window_s
         self._moving_only = moving_only
-        self._min_periods = int(self._window_s) if min_periods is None else min_periods
+        self._min_periods = (
+            _default_min_periods(self._window_s) if min_periods is None else min_periods
+        )
 
     def __str__(self) -> str:
         mode = "moving" if self._moving_only else "elapsed"
