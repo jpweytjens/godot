@@ -5,14 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "altair>=6.0.0",
     "gpxpy>=1.6.2",
     "jinja2>=3.1.6",
     "jupyter>=1.1.1",
-    "matplotlib>=3.10.8",
     "numpy>=2.4.3",
     "pandas[excel,parquet,performance,xml]>=3.0.1",
     "scipy>=1.17.1",
     "tqdm>=4.67.3",
+    "vl-convert-python>=1.9.0.post1",
 ]
 
 [dependency-groups]
