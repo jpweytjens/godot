@@ -157,6 +157,7 @@ def load_ride(
     gpx_path: Path,
     distance_method: str = "haversine",
     smooth_speed: bool = True,
+    smooth_window: str = "5s",
 ) -> Ride:
     """Load a GPX file and return a fully prepared `Ride`.
 
@@ -170,7 +171,9 @@ def load_ride(
     distance_method : str, optional
         `"haversine"` (default) or `"integrated"`.
     smooth_speed : bool, optional
-        Whether to apply the 5 s rolling speed smoother. Default True.
+        Whether to apply the rolling speed smoother. Default True.
+    smooth_window : str, optional
+        Rolling window size as a pandas time offset string. Default `"5s"`.
 
     Returns
     -------
@@ -182,7 +185,7 @@ def load_ride(
     df = read_gpx(gpx_path).pipe(_DISTANCE_PIPES[distance_method]).pipe(fill_pauses)
 
     if smooth_speed:
-        df = add_smooth_speed(df)
+        df = add_smooth_speed(df, window=smooth_window)
     else:
         df = df.assign(speed_kmh=df["speed_ms"] * 3.6)
 

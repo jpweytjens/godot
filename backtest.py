@@ -14,8 +14,7 @@ from eta.plot import (
     eta_error,
     pause_bands,
     prep_time_axis,
-    speed_actual,
-    speed_estimated,
+    speed_comparison,
 )
 from eta.ride import load_ride
 
@@ -80,6 +79,7 @@ def run(
     gpx_path: Path,
     distance_method: str = "haversine",
     smooth_speed: bool = True,
+    smooth_window: str = "5s",
 ) -> dict:
     """Run all estimators against a single GPX file, save plots, return metrics.
 
@@ -90,7 +90,9 @@ def run(
     distance_method : str, optional
         Distance pipeline to apply: ``"haversine"`` (default) or ``"integrated"``.
     smooth_speed : bool, optional
-        Whether to apply the 5s rolling speed smoother. Default True.
+        Whether to apply the rolling speed smoother. Default True.
+    smooth_window : str, optional
+        Rolling window size as a pandas time offset string. Default `"5s"`.
 
     Returns
     -------
@@ -98,7 +100,7 @@ def run(
         Row dict with keys: ride, distance_method, speed_smoothed, route_type,
         and per-estimator MAE/RMSE columns.
     """
-    ride = load_ride(gpx_path, distance_method, smooth_speed)
+    ride = load_ride(gpx_path, distance_method, smooth_speed, smooth_window)
     results = {name: backtest(ride, est) for name, est in ESTIMATORS.items()}
 
     out_dir = Path("output") / "backtests" / ride.name
@@ -119,8 +121,7 @@ def run(
 
         speed_chart = alt.layer(
             pause_bands(ride.pauses),
-            speed_actual(ride_prepped),
-            speed_estimated(result_prepped),
+            speed_comparison(ride_prepped, result_prepped),
         ).properties(width=800, height=200)
 
         chart = (error_chart & speed_chart).properties(
@@ -181,6 +182,12 @@ if __name__ == "__main__":
         metavar="ON|OFF",
         help="Speed smoothing option(s) to include (default: off)",
     )
+    parser.add_argument(
+        "--smooth-window",
+        default="5s",
+        metavar="WINDOW",
+        help="Rolling window size for speed smoothing (default: 5s)",
+    )
     args = parser.parse_args()
 
     paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
@@ -196,6 +203,7 @@ if __name__ == "__main__":
         [c[0] for c in combos],
         [c[1] for c in combos],
         [c[2] for c in combos],
+        [args.smooth_window] * len(combos),
         desc="Backtesting",
         unit="run",
     )
