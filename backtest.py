@@ -8,7 +8,7 @@ from tqdm.contrib.concurrent import process_map
 
 from eta.benchmark import backtest, compute_metrics
 from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
-from eta.pause import NanPauses, NoPause
+from eta.pause import NoPause, SubtractElapsed
 from eta.plot import (
     comparison_errors,
     error_refs,
@@ -59,23 +59,23 @@ _TABLE_STYLES = [
 ]
 
 ESTIMATORS = {
-    "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), NanPauses()),
+    "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
     "Average speed (total)": (AvgSpeedEstimator(moving_only=False), NoPause()),
-    # "Rolling 1 min (moving)": (RollingAvgSpeedEstimator(window_s=60, moving_only=True), NanPauses()),
+    # "Rolling 1 min (moving)": (RollingAvgSpeedEstimator(window_s=60, moving_only=True), SubtractElapsed()),
     # "Rolling 1 min (total)": (RollingAvgSpeedEstimator(window_s=60, moving_only=False), NoPause()),
     "Rolling 5 min (moving)": (
         RollingAvgSpeedEstimator(window_s=300, moving_only=True),
-        NanPauses(),
+        SubtractElapsed(),
     ),
     "Rolling 5 min (total)": (
         RollingAvgSpeedEstimator(window_s=300, moving_only=False),
         NoPause(),
     ),
-    # "Rolling 10 min (moving)": (RollingAvgSpeedEstimator(window_s=600, moving_only=True), NanPauses()),
+    # "Rolling 10 min (moving)": (RollingAvgSpeedEstimator(window_s=600, moving_only=True), SubtractElapsed()),
     # "Rolling 10 min (total)": (RollingAvgSpeedEstimator(window_s=600, moving_only=False), NoPause()),
     "Rolling 30 min (moving)": (
         RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
-        NanPauses(),
+        SubtractElapsed(),
     ),
     "Rolling 30 min (total)": (
         RollingAvgSpeedEstimator(window_s=1800, moving_only=False),
