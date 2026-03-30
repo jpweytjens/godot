@@ -7,7 +7,13 @@ import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
 from eta.benchmark import backtest, compute_metrics
-from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from eta.estimators import (
+    AvgSpeedEstimator,
+    DEWMASpeedEstimator,
+    EWMASpeedEstimator,
+    RollingAvgSpeedEstimator,
+    RollingMedianSpeedEstimator,
+)
 from eta.pause import NoPause, SubtractElapsed
 from eta.plot import (
     comparison_errors,
@@ -61,25 +67,43 @@ _TABLE_STYLES = [
 ESTIMATORS = {
     "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
     "Average speed (total)": (AvgSpeedEstimator(moving_only=False), NoPause()),
-    # "Rolling 1 min (moving)": (RollingAvgSpeedEstimator(window_s=60, moving_only=True), SubtractElapsed()),
-    # "Rolling 1 min (total)": (RollingAvgSpeedEstimator(window_s=60, moving_only=False), NoPause()),
     "Rolling 5 min (moving)": (
         RollingAvgSpeedEstimator(window_s=300, moving_only=True),
         SubtractElapsed(),
     ),
-    "Rolling 5 min (total)": (
-        RollingAvgSpeedEstimator(window_s=300, moving_only=False),
-        NoPause(),
+    "Rolling 10 min (moving)": (
+        RollingAvgSpeedEstimator(window_s=600, moving_only=True),
+        SubtractElapsed(),
     ),
-    # "Rolling 10 min (moving)": (RollingAvgSpeedEstimator(window_s=600, moving_only=True), SubtractElapsed()),
-    # "Rolling 10 min (total)": (RollingAvgSpeedEstimator(window_s=600, moving_only=False), NoPause()),
     "Rolling 30 min (moving)": (
         RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
         SubtractElapsed(),
     ),
-    "Rolling 30 min (total)": (
-        RollingAvgSpeedEstimator(window_s=1800, moving_only=False),
-        NoPause(),
+    "Rolling 60 min (moving)": (
+        RollingAvgSpeedEstimator(window_s=3600, moving_only=True),
+        SubtractElapsed(),
+    ),
+    "Rolling median 30 min (moving)": (
+        RollingMedianSpeedEstimator(window_s=1800, moving_only=True),
+        SubtractElapsed(),
+    ),
+    "EWMA 60 min (moving)": (
+        EWMASpeedEstimator(span_s=3600, moving_only=True),
+        SubtractElapsed(),
+    ),
+    "EWMA 10 min (moving)": (
+        EWMASpeedEstimator(span_s=600, moving_only=True),
+        SubtractElapsed(),
+    ),
+    "DEWMA 10+60 min (moving)": (
+        DEWMASpeedEstimator(
+            slow_span_s=3600,
+            fast_span_s=600,
+            slow_weight=0.7,
+            fast_weight=0.3,
+            moving_only=True,
+        ),
+        SubtractElapsed(),
     ),
 }
 
