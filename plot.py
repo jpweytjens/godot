@@ -69,7 +69,7 @@ def _clip(df: pd.DataFrame, warmup_pct: float | None) -> pd.DataFrame:
 def _draw_pause_bands(
     ax: Axes,
     ride_clipped: pd.DataFrame,
-    t0_ms: int,
+    t0: pd.Timestamp,
     pause_kmh: float,
     min_pause_s: float,
 ) -> None:
@@ -77,13 +77,11 @@ def _draw_pause_bands(
     is_slow = ride_clipped["speed_kmh"] < pause_kmh
     run_id = (is_slow != is_slow.shift()).cumsum()
     for _, group in ride_clipped[is_slow].groupby(run_id[is_slow]):
-        duration_s = (
-            group["timestamp_ms"].iloc[-1] - group["timestamp_ms"].iloc[0]
-        ) / 1000
+        duration_s = (group["time"].iloc[-1] - group["time"].iloc[0]).total_seconds()
         if duration_s >= min_pause_s:
             ax.axvspan(
-                (group["timestamp_ms"].iloc[0] - t0_ms) / 60_000,
-                (group["timestamp_ms"].iloc[-1] - t0_ms) / 60_000,
+                (group["time"].iloc[0] - t0).total_seconds() / 60,
+                (group["time"].iloc[-1] - t0).total_seconds() / 60,
                 alpha=0.2,
                 color=TOL_BRIGHT[0],
                 linewidth=0,
@@ -338,8 +336,8 @@ def plot_delta(
 
     r = _clip(result, warmup_pct)
     if x_axis == "time":
-        t0 = r["timestamp_ms"].iloc[0]
-        x = (r["timestamp_ms"] - t0) / 60_000
+        t0 = r["time"].iloc[0]
+        x = (r["time"] - t0).dt.total_seconds() / 60
         xlabel = "Elapsed time (min)"
         effective_overlay = None  # overlays are position-based
     else:
@@ -349,7 +347,7 @@ def plot_delta(
 
     if ride_df is not None and x_axis == "time":
         ride_clipped = _clip(ride_df, warmup_pct)
-        _draw_pause_bands(ax, ride_clipped, r["timestamp_ms"].iloc[0], 1.0, 60.0)
+        _draw_pause_bands(ax, ride_clipped, r["time"].iloc[0], 1.0, 60.0)
 
     ax.plot(x, r["delta_s"] / 60, color=TOL_VIBRANT[5], linewidth=1.2)
     ax.axhline(5, linestyle="--", color="#BBBBBB", linewidth=1, label="+5 min")
@@ -386,13 +384,13 @@ def plot_speed(
     Parameters
     ----------
     result : pd.DataFrame
-        Output of backtest(), must include timestamp_ms and speed_ms columns.
+        Output of backtest(), must include time and speed_ms columns.
     title : str
         Plot title.
     ax : Axes, optional
         Axes to draw on. Creates a new figure if None.
     ride_df : pd.DataFrame, optional
-        Original ride DataFrame with speed_kmh and timestamp_ms columns.
+        Original ride DataFrame with speed_kmh and time columns.
     warmup_pct : float, optional
         If set, hides data before this fraction of total distance.
     pause_kmh : float, optional
@@ -409,8 +407,8 @@ def plot_speed(
     r = _clip(result, warmup_pct)
 
     if x_axis == "time":
-        t0_ms = r["timestamp_ms"].iloc[0]
-        x_est = (r["timestamp_ms"] - t0_ms) / 60_000
+        t0 = r["time"].iloc[0]
+        x_est = (r["time"] - t0).dt.total_seconds() / 60
         xlabel = "Elapsed time (min)"
     else:
         x_est = r["distance_m"] / 1000
@@ -420,8 +418,8 @@ def plot_speed(
         ride_clipped = _clip(ride_df, warmup_pct)
 
         if x_axis == "time":
-            t0_ride = ride_clipped["timestamp_ms"].iloc[0]
-            x_ride = (ride_clipped["timestamp_ms"] - t0_ride) / 60_000
+            t0_ride = ride_clipped["time"].iloc[0]
+            x_ride = (ride_clipped["time"] - t0_ride).dt.total_seconds() / 60
             _draw_pause_bands(ax, ride_clipped, t0_ride, pause_kmh, min_pause_s)
         else:
             x_ride = ride_clipped["distance_m"] / 1000

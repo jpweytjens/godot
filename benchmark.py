@@ -16,7 +16,7 @@ class Estimator(Protocol):
         Parameters
         ----------
         df : pd.DataFrame
-            Ride DataFrame with columns: timestamp_ms, distance_m, speed_kmh, elevation_m.
+            Ride DataFrame with columns: time, distance_m, elevation_m, speed_kmh.
 
         Returns
         -------
@@ -34,7 +34,7 @@ def backtest(
     Parameters
     ----------
     df : pd.DataFrame
-        Ride DataFrame with columns: timestamp_ms, distance_m, elevation_m, speed_kmh.
+        Ride DataFrame with columns: time, distance_m, elevation_m, speed_kmh.
     estimator : Estimator
         Estimator implementing predict().
     min_speed_kmh : float, optional
@@ -44,18 +44,18 @@ def backtest(
     Returns
     -------
     pd.DataFrame
-        Columns: timestamp_ms, distance_m, speed_ms, eta_remaining_s, ata_remaining_s, delta_s.
+        Columns: time, distance_m, speed_ms, eta_remaining_s, ata_remaining_s, delta_s.
         delta_s = eta_remaining_s - ata_remaining_s (positive = overestimate).
     """
     if min_speed_kmh is None:
         min_speed_kmh = 5.0
     speed_ms = estimator.predict(df)
     remaining_m = df["distance_m"].iloc[-1] - df["distance_m"]
-    ata_s = (df["timestamp_ms"].iloc[-1] - df["timestamp_ms"]) / 1000.0
+    ata_s = (df["time"].iloc[-1] - df["time"]).dt.total_seconds()
     eta_s = remaining_m / speed_ms.where(speed_ms >= min_speed_kmh / 3.6)
     return pd.DataFrame(
         {
-            "timestamp_ms": df["timestamp_ms"].values,
+            "time": df["time"].values,
             "distance_m": df["distance_m"].values,
             "speed_ms": speed_ms.values,
             "eta_remaining_s": eta_s.values,

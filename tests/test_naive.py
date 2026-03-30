@@ -6,7 +6,7 @@ from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
 def make_ride(timestamps_ms, distances_m, speeds_kmh):
     return pd.DataFrame(
         {
-            "timestamp_ms": timestamps_ms,
+            "time": pd.to_datetime(timestamps_ms, unit="ms"),
             "distance_m": distances_m,
             "speed_kmh": speeds_kmh,
             "elevation_m": np.zeros(len(timestamps_ms)),

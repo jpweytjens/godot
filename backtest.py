@@ -126,7 +126,7 @@ def has_pauses(
     Parameters
     ----------
     df : pd.DataFrame
-        Ride DataFrame with speed_kmh and timestamp_ms columns.
+        Ride DataFrame with speed_kmh and time columns.
     pause_kmh : float, optional
         Speed threshold below which a point is considered stopped. Default 1.0.
     min_pause_s : float, optional
@@ -140,8 +140,8 @@ def has_pauses(
     run_id = (is_slow != is_slow.shift()).cumsum()
     slow_durations = (
         df[is_slow]
-        .groupby(run_id[is_slow])["timestamp_ms"]
-        .agg(lambda t: (t.iloc[-1] - t.iloc[0]) / 1000)
+        .groupby(run_id[is_slow])["time"]
+        .agg(lambda t: (t.iloc[-1] - t.iloc[0]).total_seconds())
     )
     return bool(len(slow_durations) > 0 and slow_durations.max() >= min_pause_s)
 

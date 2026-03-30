@@ -20,7 +20,7 @@ def make_synthetic_ride(
     time_s = dist / speed_ms
     return pd.DataFrame(
         {
-            "timestamp_ms": (time_s * 1000).astype(int),
+            "time": pd.to_datetime((time_s * 1000).astype(int), unit="ms"),
             "distance_m": dist,
             "elevation_m": np.zeros(n),
             "speed_kmh": np.full(n, speed_kmh),
@@ -32,7 +32,7 @@ def test_backtest_columns():
     df = make_synthetic_ride()
     result = backtest(df, ConstantSpeedEstimator())
     assert list(result.columns) == [
-        "timestamp_ms",
+        "time",
         "distance_m",
         "speed_ms",
         "eta_remaining_s",

@@ -20,7 +20,7 @@ def read_gpx(path: Path) -> pd.DataFrame:
     Returns
     -------
     pd.DataFrame
-        Columns: timestamp_ms, lat, lon, elevation_m, speed_ms.
+        Columns: time, lat, lon, elevation_m, speed_ms.
         Additional extension fields (hr, cad, watts, atemp) included if present.
         No distance or derived speed columns — apply pipe functions for those.
     """
@@ -41,7 +41,7 @@ def read_gpx(path: Path) -> pd.DataFrame:
                                 pass
                 rows.append(
                     {
-                        "timestamp_ms": int(pt.time.timestamp() * 1000),
+                        "time": pd.Timestamp(pt.time.timestamp(), unit="s"),
                         "lat": pt.latitude,
                         "lon": pt.longitude,
                         "elevation_m": pt.elevation or 0.0,
@@ -53,7 +53,7 @@ def read_gpx(path: Path) -> pd.DataFrame:
                         },
                     }
                 )
-    return pd.DataFrame(rows).sort_values("timestamp_ms").reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
 
 
 def add_haversine_distance(df: pd.DataFrame) -> pd.DataFrame:
@@ -89,14 +89,14 @@ def add_integrated_distance(df: pd.DataFrame) -> pd.DataFrame:
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame with timestamp_ms and speed_ms columns.
+        DataFrame with time and speed_ms columns.
 
     Returns
     -------
     pd.DataFrame
         Input DataFrame with distance_m column added. First row is 0.0.
     """
-    dt_s = df["timestamp_ms"].diff().fillna(0) / 1000.0
+    dt_s = df["time"].diff().dt.total_seconds().fillna(0)
     step = (df["speed_ms"].fillna(0) * dt_s).clip(lower=0)
     return df.assign(distance_m=step.cumsum())
 
@@ -111,7 +111,7 @@ def add_smooth_speed(
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame with timestamp_ms and speed_ms columns.
+        DataFrame with time and speed_ms columns.
     window : str, optional
         Rolling window size as a pandas time offset string, by default '5s'.
     clip_lower : float, optional
@@ -122,9 +122,8 @@ def add_smooth_speed(
     pd.DataFrame
         Input DataFrame with speed_kmh column added.
     """
-    idx = pd.to_datetime(df["timestamp_ms"], unit="ms")
     speed_kmh = (
-        pd.Series(df["speed_ms"].values * 3.6, index=idx)
+        pd.Series(df["speed_ms"].values * 3.6, index=df["time"])
         .rolling(window)
         .mean()
         .fillna(0.0)

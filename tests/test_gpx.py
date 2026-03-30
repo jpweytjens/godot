@@ -1,4 +1,5 @@
 from pathlib import Path
+import pandas as pd
 import pytest
 from gpx import (
     read_gpx,
@@ -14,13 +15,13 @@ GPX = GPX_FILES[0] if GPX_FILES else None
 
 def test_read_gpx_columns():
     df = read_gpx(GPX)
-    for col in ["timestamp_ms", "lat", "lon", "elevation_m", "speed_ms"]:
+    for col in ["time", "lat", "lon", "elevation_m", "speed_ms"]:
         assert col in df.columns
 
 
 def test_read_gpx_timestamps_sorted():
     df = read_gpx(GPX)
-    assert (df["timestamp_ms"].diff().dropna() > 0).all()
+    assert (df["time"].diff().dropna() > pd.Timedelta(0)).all()
 
 
 def test_read_gpx_no_distance_column():

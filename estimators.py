@@ -24,7 +24,7 @@ class BaseEstimator:
         Parameters
         ----------
         df : pd.DataFrame
-            Ride DataFrame with timestamp_ms and distance_m columns.
+            Ride DataFrame with time and distance_m columns.
 
         Returns
         -------
@@ -33,7 +33,7 @@ class BaseEstimator:
             dt : time delta in seconds.
         """
         dd = df["distance_m"].diff().clip(lower=0).fillna(0)
-        dt = df["timestamp_ms"].diff().fillna(0) / 1000.0
+        dt = df["time"].diff().dt.total_seconds().fillna(0)
         return dd, dt
 
     def _moving_mask(self, df: pd.DataFrame) -> pd.Series:
@@ -52,18 +52,18 @@ class BaseEstimator:
         return (df["speed_kmh"] >= self._pause_kmh).astype(float)
 
     def _datetime_index(self, df: pd.DataFrame):
-        """Return a DatetimeIndex built from timestamp_ms for time-based rolling.
+        """Return a DatetimeIndex from the time column for time-based rolling.
 
         Parameters
         ----------
         df : pd.DataFrame
-            Ride DataFrame with timestamp_ms column.
+            Ride DataFrame with time column.
 
         Returns
         -------
         pd.DatetimeIndex
         """
-        return pd.to_datetime(df["timestamp_ms"], unit="ms")
+        return pd.DatetimeIndex(df["time"])
 
     def predict(self, df: pd.DataFrame) -> pd.Series:
         raise NotImplementedError
