@@ -67,16 +67,20 @@ _TABLE_STYLES = [
 ]
 
 ESTIMATORS = {
-    "AvgSpeed (moving)": AvgSpeedEstimator(moving_only=True),
-    "AvgSpeed (total)": AvgSpeedEstimator(moving_only=False),
-    # "Rolling 1min (moving)": RollingAvgSpeedEstimator(window_s=60, moving_only=True),
-    # "Rolling 1min (total)": RollingAvgSpeedEstimator(window_s=60, moving_only=False),
-    "Rolling 5min (moving)": RollingAvgSpeedEstimator(window_s=300, moving_only=True),
-    "Rolling 5min (total)": RollingAvgSpeedEstimator(window_s=300, moving_only=False),
-    # "Rolling 10min (moving)": RollingAvgSpeedEstimator(window_s=600, moving_only=True),
-    # "Rolling 10min (total)": RollingAvgSpeedEstimator(window_s=600, moving_only=False),
-    "Rolling 30min (moving)": RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
-    "Rolling 30min (total)": RollingAvgSpeedEstimator(window_s=1800, moving_only=False),
+    "Average speed (moving)": AvgSpeedEstimator(moving_only=True),
+    "Average speed (total)": AvgSpeedEstimator(moving_only=False),
+    # "Rolling 1 min (moving)": RollingAvgSpeedEstimator(window_s=60, moving_only=True),
+    # "Rolling 1 min (total)": RollingAvgSpeedEstimator(window_s=60, moving_only=False),
+    "Rolling 5 min (moving)": RollingAvgSpeedEstimator(window_s=300, moving_only=True),
+    "Rolling 5 min (total)": RollingAvgSpeedEstimator(window_s=300, moving_only=False),
+    # "Rolling 10 min (moving)": RollingAvgSpeedEstimator(window_s=600, moving_only=True),
+    # "Rolling 10 min (total)": RollingAvgSpeedEstimator(window_s=600, moving_only=False),
+    "Rolling 30 min (moving)": RollingAvgSpeedEstimator(
+        window_s=1800, moving_only=True
+    ),
+    "Rolling 30 min (total)": RollingAvgSpeedEstimator(
+        window_s=1800, moving_only=False
+    ),
 }
 
 
@@ -185,6 +189,7 @@ def run(
     else:
         df = df.assign(speed_kmh=df["speed_ms"] * 3.6)
     ride_name = gpx_path.stem
+    ride_label = ride_name.replace("_", " ")
     route_type = classify_route(df)
 
     results = {name: backtest(df, est) for name, est in ESTIMATORS.items()}
@@ -213,7 +218,7 @@ def run(
         ).properties(width=800, height=200)
 
         chart = (error_chart & speed_chart).properties(
-            title=alt.Title(f"{name} \u2014 {ride_name}")
+            title=alt.Title(f"{name} \u2014 {ride_label}")
         )
         safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
         chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
@@ -224,7 +229,7 @@ def run(
         comparison_errors(results, warmup_pct=0.02),
         error_refs(),
     ).properties(
-        title=alt.Title(f"All estimators \u2014 {ride_name}"),
+        title=alt.Title(f"All estimators \u2014 {ride_label}"),
         width=900,
         height=350,
     )
