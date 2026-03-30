@@ -105,6 +105,8 @@ def fill_pauses(df: pd.DataFrame) -> pd.DataFrame:
     """Resample to 1-second frequency, filling gaps left by auto-pause.
 
     Inserted rows get ``speed_ms = 0`` and a ``paused = True`` flag.
+    Rows where ``distance_m`` hasn't changed are also flagged as paused,
+    catching recorded-but-stationary points (e.g. waiting at a light).
     Lat, lon, elevation, and distance are forward-filled from the last
     recorded point.
 
@@ -119,11 +121,14 @@ def fill_pauses(df: pd.DataFrame) -> pd.DataFrame:
         DataFrame at 1-second frequency with a ``paused`` boolean column.
     """
     out = df.set_index("time").asfreq("1s")
-    out["paused"] = out["lat"].isna()
+    resampled = out["lat"].isna()
     out[["lat", "lon", "elevation_m"]] = out[["lat", "lon", "elevation_m"]].ffill()
     if "distance_m" in out.columns:
         out["distance_m"] = out["distance_m"].ffill()
     out["speed_ms"] = out["speed_ms"].fillna(0.0)
+    # Recorded but not moving — treat as paused to avoid zero-speed estimates
+    stationary = out["distance_m"].diff().fillna(0) == 0
+    out["paused"] = resampled | stationary
     return out.reset_index()
 
 
