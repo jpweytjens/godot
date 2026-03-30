@@ -23,11 +23,10 @@ _DISTANCE_PIPES = {
 @dataclass
 class Ride:
     """A fully prepared ride ready for backtesting and plotting.
-
     Parameters
     ----------
     name : str
-        GPX file stem, e.g. ``"criquielion"``.
+        GPX file stem, e.g. `"criquielion"`.
     label : str
         Human-readable name (underscores replaced with spaces).
     df : pd.DataFrame
@@ -35,14 +34,14 @@ class Ride:
         speed_ms, distance_m, paused, speed_kmh, delta_distance,
         delta_time, elapsed_min.
     route_type : str
-        One of ``"uphill"``, ``"downhill"``, ``"flat"``, ``"hilly"``,
-        ``"mountain"``.
+        One of `"uphill"`, `"downhill"`, `"flat"`, `"hilly"`,
+        `"mountain"`.
     contains_pauses : bool
         Whether the ride contains pauses >= 60 s.
     pauses : pd.DataFrame
-        Pause intervals with ``start_min`` and ``end_min`` columns.
+        Pause intervals with `start_min` and `end_min` columns.
     distance_method : str
-        Distance pipeline used: ``"haversine"`` or ``"integrated"``.
+        Distance pipeline used: `"haversine"` or `"integrated"`.
     speed_smoothed : bool
         Whether speed was smoothed with a rolling mean.
     distance : float
@@ -92,8 +91,8 @@ def classify_route(
     Returns
     -------
     str
-        One of: ``"uphill"``, ``"downhill"``, ``"flat"``, ``"hilly"``,
-        ``"mountain"``.
+        One of: `"uphill"`, `"downhill"`, `"flat"`, `"hilly"`,
+        `"mountain"`.
     """
     diff = df["elevation_m"].diff().fillna(0)
     ascent_m = diff[diff > 0].sum()
@@ -154,7 +153,7 @@ def load_ride(
     gpx_path : Path
         Path to the GPX file.
     distance_method : str, optional
-        ``"haversine"`` (default) or ``"integrated"``.
+        `"haversine"` (default) or `"integrated"`.
     smooth_speed : bool, optional
         Whether to apply the 5 s rolling speed smoother. Default True.
 
