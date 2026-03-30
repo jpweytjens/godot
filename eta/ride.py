@@ -10,6 +10,7 @@ from eta.gpx import (
     add_integrated_distance,
     add_smooth_speed,
     fill_pauses,
+    pause_run_id,
     read_gpx,
 )
 from eta.plot import pause_intervals, prep_time_axis
@@ -144,7 +145,7 @@ def has_pauses(
     bool
     """
     is_paused = df["paused"]
-    run_id = (is_paused != is_paused.shift()).cumsum()
+    run_id = pause_run_id(is_paused)
     pause_durations = (
         df[is_paused]
         .groupby(run_id[is_paused])["time"]

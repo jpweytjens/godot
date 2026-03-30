@@ -157,3 +157,22 @@ def add_smooth_speed(
         .values
     )
     return df.assign(speed_kmh=speed_kmh)
+
+
+def pause_run_id(paused: pd.Series) -> pd.Series:
+    """Assign a unique integer ID to each contiguous pause/riding run.
+
+    Consecutive rows with the same `paused` value share an ID.
+    Each transition (paused to riding or vice versa) increments the ID.
+
+    Parameters
+    ----------
+    paused : pd.Series
+        Boolean series indicating paused state at each row.
+
+    Returns
+    -------
+    pd.Series
+        Integer series with a unique ID per contiguous block.
+    """
+    return (paused != paused.shift()).cumsum()
