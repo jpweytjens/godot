@@ -1,6 +1,11 @@
-from typing import Protocol
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol
 
 import pandas as pd
+
+if TYPE_CHECKING:
+    from eta.ride import Ride
 
 
 class Estimator(Protocol):
@@ -10,13 +15,13 @@ class Estimator(Protocol):
     Implement predict() to return estimated speed (m/s) at each row.
     """
 
-    def predict(self, df: pd.DataFrame) -> pd.Series:
+    def predict(self, ride: Ride) -> pd.Series:
         """Return estimated speed in m/s at each row.
 
         Parameters
         ----------
-        df : pd.DataFrame
-            Ride DataFrame with columns: time, distance_m, elevation_m, speed_kmh.
+        ride : Ride
+            Prepared ride from `load_ride`.
 
         Returns
         -------
@@ -27,14 +32,14 @@ class Estimator(Protocol):
 
 
 def backtest(
-    df: pd.DataFrame, estimator: Estimator, min_speed_kmh: float | None = None
+    ride: Ride, estimator: Estimator, min_speed_kmh: float | None = None
 ) -> pd.DataFrame:
-    """Run an estimator over a ride DataFrame and record ETA vs ATA.
+    """Run an estimator over a ride and record ETA vs ATA.
 
     Parameters
     ----------
-    df : pd.DataFrame
-        Ride DataFrame with columns: time, distance_m, elevation_m, speed_kmh.
+    ride : Ride
+        Prepared ride from `load_ride`.
     estimator : Estimator
         Estimator implementing predict().
     min_speed_kmh : float, optional
@@ -49,8 +54,9 @@ def backtest(
     """
     if min_speed_kmh is None:
         min_speed_kmh = 5.0
-    speed_ms = estimator.predict(df)
-    remaining_m = df["distance_m"].iloc[-1] - df["distance_m"]
+    df = ride.df
+    speed_ms = estimator.predict(ride)
+    remaining_m = ride.distance - df["distance_m"]
     ata_s = (df["time"].iloc[-1] - df["time"]).dt.total_seconds()
     eta_s = remaining_m / speed_ms.where(speed_ms >= min_speed_kmh / 3.6)
     return pd.DataFrame(
@@ -63,3 +69,29 @@ def backtest(
             "delta_s": (eta_s - ata_s).values,
         }
     )
+
+
+def compute_metrics(
+    result_df: pd.DataFrame, warmup_distance_m: float
+) -> dict[str, float]:
+    """Compute MAE and RMSE for a single estimator backtest result.
+
+    Parameters
+    ----------
+    result_df : pd.DataFrame
+        Output of `backtest` with `distance_m` and `delta_s` columns.
+    warmup_distance_m : float
+        Distance threshold; rows below this are excluded.
+
+    Returns
+    -------
+    dict[str, float]
+        Keys: ``mae_min``, ``rmse_min`` (both in minutes).
+    """
+    trimmed = result_df[result_df["distance_m"] >= warmup_distance_m][
+        "delta_s"
+    ].dropna()
+    return {
+        "mae_min": trimmed.abs().mean() / 60,
+        "rmse_min": (trimmed**2).mean() ** 0.5 / 60,
+    }
