@@ -6,26 +6,18 @@ import altair as alt
 import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
-from eta.benchmark import backtest
+from eta.benchmark import backtest, compute_metrics
 from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
-from eta.gpx import (
-    add_haversine_distance,
-    add_integrated_distance,
-    add_smooth_speed,
-    fill_pauses,
-    read_gpx,
-)
-
 from eta.plot import (
     comparison_errors,
     error_refs,
     eta_error,
     pause_bands,
-    pause_intervals,
     prep_time_axis,
     speed_actual,
     speed_estimated,
 )
+from eta.ride import load_ride
 
 _N_INFO_COLS = 5  # ride, distance_method, speed_smoothed, route_type, contains_pauses
 
@@ -84,81 +76,6 @@ ESTIMATORS = {
 }
 
 
-def classify_route(
-    df: pd.DataFrame,
-    dominance_ratio: float = 1.25,
-    flat_m: float = 500.0,
-    mountain_m: float = 2000.0,
-) -> str:
-    """Classify a ride by its elevation profile.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Ride DataFrame with an elevation_m column.
-    dominance_ratio : float, optional
-        If one direction exceeds the other by this factor, the route is
-        classified as uphill or downhill. Default 1.25 (25% more).
-    flat_m : float, optional
-        Maximum cumulative ascent (m) for a balanced route to be called flat.
-    mountain_m : float, optional
-        Minimum cumulative ascent (m) for a balanced route to be called mountain.
-
-    Returns
-    -------
-    str
-        One of: "uphill", "downhill", "flat", "hilly", "mountain".
-    """
-    diff = df["elevation_m"].diff().fillna(0)
-    ascent_m = diff[diff > 0].sum()
-    descent_m = -diff[diff < 0].sum()
-
-    if ascent_m > descent_m * dominance_ratio:
-        return "uphill"
-    if descent_m > ascent_m * dominance_ratio:
-        return "downhill"
-    if ascent_m < flat_m:
-        return "flat"
-    if ascent_m < mountain_m:
-        return "hilly"
-    return "mountain"
-
-
-def has_pauses(
-    df: pd.DataFrame,
-    min_pause_s: float = 60.0,
-) -> bool:
-    """Return True if the ride contains at least one pause long enough to matter.
-
-    Requires a ``paused`` boolean column produced by ``fill_pauses``.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Ride DataFrame with paused and time columns.
-    min_pause_s : float, optional
-        Minimum duration (seconds) for a paused run to count. Default 60.
-
-    Returns
-    -------
-    bool
-    """
-    is_paused = df["paused"]
-    run_id = (is_paused != is_paused.shift()).cumsum()
-    pause_durations = (
-        df[is_paused]
-        .groupby(run_id[is_paused])["time"]
-        .agg(lambda t: (t.iloc[-1] - t.iloc[0]).total_seconds())
-    )
-    return bool(len(pause_durations) > 0 and pause_durations.max() >= min_pause_s)
-
-
-_DISTANCE_PIPES = {
-    "haversine": add_haversine_distance,
-    "integrated": add_integrated_distance,
-}
-
-
 def run(
     gpx_path: Path,
     distance_method: str = "haversine",
@@ -181,73 +98,62 @@ def run(
         Row dict with keys: ride, distance_method, speed_smoothed, route_type,
         and per-estimator MAE/RMSE columns.
     """
-    if distance_method not in _DISTANCE_PIPES:
-        raise ValueError(f"distance_method must be one of {list(_DISTANCE_PIPES)}")
-    df = read_gpx(gpx_path).pipe(_DISTANCE_PIPES[distance_method]).pipe(fill_pauses)
-    if smooth_speed:
-        df = add_smooth_speed(df)
-    else:
-        df = df.assign(speed_kmh=df["speed_ms"] * 3.6)
-    ride_name = gpx_path.stem
-    ride_label = ride_name.replace("_", " ")
-    route_type = classify_route(df)
+    ride = load_ride(gpx_path, distance_method, smooth_speed)
+    results = {name: backtest(ride, est) for name, est in ESTIMATORS.items()}
 
-    results = {name: backtest(df, est) for name, est in ESTIMATORS.items()}
-
-    out_dir = Path("output") / "backtests" / ride_name
+    out_dir = Path("output") / "backtests" / ride.name
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare shared data for plotting
-    ride_prepped = prep_time_axis(df, warmup_pct=0.02)
-    pauses = pause_intervals(ride_prepped)
+    # Prepare ride data for plotting (with warmup clipped)
+    ride_prepped = prep_time_axis(ride.df, warmup_pct=0.02)
 
     # Per-estimator: 1x2 (ETA error | speed), time domain
     for name, result in results.items():
         result_prepped = prep_time_axis(result, warmup_pct=0.02)
 
         error_chart = alt.layer(
-            pause_bands(pauses),
+            pause_bands(ride.pauses),
             eta_error(result_prepped),
             error_refs(),
         ).properties(width=800, height=200)
 
         speed_chart = alt.layer(
-            pause_bands(pauses),
+            pause_bands(ride.pauses),
             speed_actual(ride_prepped),
             speed_estimated(result_prepped),
         ).properties(width=800, height=200)
 
         chart = (error_chart & speed_chart).properties(
-            title=alt.Title(f"{name} \u2014 {ride_label}")
+            title=alt.Title(f"{name} \u2014 {ride.label}")
         )
         safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
         chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
 
     # Comparison: all estimators' ETA error on one chart
     comp_chart = alt.layer(
-        pause_bands(pauses),
+        pause_bands(ride.pauses),
         comparison_errors(results, warmup_pct=0.02),
         error_refs(),
     ).properties(
-        title=alt.Title(f"All estimators \u2014 {ride_label}"),
+        title=alt.Title(f"All estimators \u2014 {ride.label}"),
         width=900,
         height=350,
     )
     comp_chart.save(str(out_dir / "comparison.png"), scale_factor=2)
 
     row: dict = {
-        "ride": ride_name,
+        "ride": ride.name,
         "distance_method": distance_method,
         "speed_smoothed": smooth_speed,
-        "route_type": route_type,
-        "contains_pauses": has_pauses(df),
+        "route_type": ride.route_type,
+        "contains_pauses": ride.contains_pauses,
     }
-    warmup_cutoff = df["distance_m"].iloc[-1] * 0.02
+    warmup_m = ride.distance * 0.02
     for name, result in results.items():
-        trimmed = result[result["distance_m"] >= warmup_cutoff]["delta_s"].dropna()
+        metrics = compute_metrics(result, warmup_m)
         col = name.lower().replace(" ", "_")
-        row[f"{col}_mae"] = trimmed.abs().mean() / 60
-        row[f"{col}_rmse"] = (trimmed**2).mean() ** 0.5 / 60
+        row[f"{col}_mae"] = metrics["mae_min"]
+        row[f"{col}_rmse"] = metrics["rmse_min"]
     return row
 
 
