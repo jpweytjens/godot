@@ -1,8 +1,13 @@
 """Cycling ETA estimator — prototype package."""
 
 from eta.benchmark import backtest, compute_metrics
-from eta.estimators import AvgSpeedEstimator, BaseEstimator, RollingAvgSpeedEstimator
+from eta.estimators import (
+    AvgSpeedEstimator,
+    BaseEstimator,
+    RollingAvgSpeedEstimator,
+)
 from eta.pause import AddElapsed, NanPauses, NoPause, SubtractElapsed
+from eta.fit import read_fit
 from eta.gpx import (
     read_gpx,
 )
@@ -12,14 +17,18 @@ from eta.plot import (
     eta_error,
     speed_comparison,
 )
-from eta.ride import Ride, load_ride
+from eta.ride import Ride, load_ride, compute_global_prior
+
 
 __all__ = [
+    # fit
+    "read_fit",
     # gpx
     "read_gpx",
     # ride
     "Ride",
     "load_ride",
+    "compute_global_prior",
     # estimators
     "BaseEstimator",
     "AvgSpeedEstimator",

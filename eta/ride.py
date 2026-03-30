@@ -1,10 +1,16 @@
 """Ride loading, preparation, and classification."""
 
+from __future__ import annotations
+
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
 import pandas as pd
+from loguru import logger
 
+from eta.fit import read_fit
 from eta.gpx import (
     add_haversine_distance,
     add_integrated_distance,
@@ -14,6 +20,11 @@ from eta.gpx import (
     read_gpx,
 )
 from eta.plot import prep_time_axis
+
+_PARSERS = {
+    ".gpx": read_gpx,
+    ".fit": read_fit,
+}
 
 _DISTANCE_PIPES = {
     "haversine": add_haversine_distance,
@@ -152,20 +163,20 @@ def has_pauses(
 
 
 def load_ride(
-    gpx_path: Path,
+    path: Path,
     distance_method: str = "haversine",
     smooth_speed: bool = True,
     smooth_window: str = "5s",
 ) -> Ride:
-    """Load a GPX file and return a fully prepared `Ride`.
+    """Load a GPX or FIT file and return a fully prepared `Ride`.
 
     Pipeline: read → distance → fill_pauses → smooth speed → add deltas
     → add elapsed_min → compute scalars → classify → build pause intervals.
 
     Parameters
     ----------
-    gpx_path : Path
-        Path to the GPX file.
+    path : Path
+        Path to a `.gpx` or `.fit` file.
     distance_method : str, optional
         `"haversine"` (default) or `"integrated"`.
     smooth_speed : bool, optional
@@ -180,7 +191,12 @@ def load_ride(
     if distance_method not in _DISTANCE_PIPES:
         raise ValueError(f"distance_method must be one of {list(_DISTANCE_PIPES)}")
 
-    df = read_gpx(gpx_path).pipe(_DISTANCE_PIPES[distance_method]).pipe(fill_pauses)
+    suffix = path.suffix.lower()
+    parser = _PARSERS.get(suffix)
+    if parser is None:
+        raise ValueError(f"Unsupported file type {suffix!r}, expected .gpx or .fit")
+
+    df = parser(path).pipe(_DISTANCE_PIPES[distance_method]).pipe(fill_pauses)
 
     if smooth_speed:
         df = add_smooth_speed(df, window=smooth_window)
@@ -203,7 +219,7 @@ def load_ride(
     ride_time = df.loc[~paused_mask, "delta_time"].sum()
     paused_time = df.loc[paused_mask, "delta_time"].sum()
 
-    name = gpx_path.stem
+    name = path.stem
     return Ride(
         name=name,
         label=name.replace("_", " "),
@@ -217,3 +233,61 @@ def load_ride(
         ride_time=ride_time,
         paused_time=paused_time,
     )
+
+
+def compute_global_prior(
+    gpx_paths: Sequence[Path],
+    distance_method: str = "integrated",
+    cache_dir: Path = Path("output"),
+) -> float:
+    """Global average moving speed (m/s) across rides.
+
+    Computed as total_distance / total_moving_time — longer rides
+    contribute proportionally more, giving an honest distance-weighted
+    average. Result is cached to disk and only recomputed when the set
+    of GPX files changes.
+
+    Parameters
+    ----------
+    gpx_paths : Sequence[Path]
+        GPX files to include.
+    distance_method : str, optional
+        Distance pipeline. Default ``"integrated"``.
+    cache_dir : Path, optional
+        Directory for the cache file. Default ``output/``.
+
+    Returns
+    -------
+    float
+        Speed in m/s.
+    """
+    cache_path = cache_dir / ".prior_cache.json"
+    key = {str(p.name): p.stat().st_mtime for p in sorted(gpx_paths)}
+
+    if cache_path.exists():
+        cached = json.loads(cache_path.read_text())
+        if (
+            cached.get("key") == key
+            and cached.get("distance_method") == distance_method
+        ):
+            prior = cached["prior_ms"]
+            logger.info(
+                f"Global prior (cached): {prior:.2f} m/s ({prior * 3.6:.1f} km/h)"
+            )
+
+            return prior
+
+    total_dist = 0.0
+    total_move_time = 0.0
+    for path in gpx_paths:
+        ride = load_ride(path, distance_method, smooth_speed=False)
+        total_dist += ride.distance
+        total_move_time += ride.ride_time
+    prior = total_dist / total_move_time
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"key": key, "distance_method": distance_method, "prior_ms": prior})
+    )
+    logger.info(f"Global prior: {prior:.2f} m/s ({prior * 3.6:.1f} km/h)")
+    return prior
