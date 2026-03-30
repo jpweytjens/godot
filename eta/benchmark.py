@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Protocol
 
 import pandas as pd
 
+from eta.pause import NoPause, PauseStrategy
+
 if TYPE_CHECKING:
     from eta.ride import Ride
 
@@ -32,7 +34,10 @@ class Estimator(Protocol):
 
 
 def backtest(
-    ride: Ride, estimator: Estimator, min_speed_kmh: float | None = None
+    ride: Ride,
+    estimator: Estimator,
+    pause_strategy: PauseStrategy | None = None,
+    min_speed_kmh: float | None = None,
 ) -> pd.DataFrame:
     """Run an estimator over a ride and record ETA vs ATA.
 
@@ -42,6 +47,8 @@ def backtest(
         Prepared ride from `load_ride`.
     estimator : Estimator
         Estimator implementing predict().
+    pause_strategy : PauseStrategy, optional
+        Strategy for adjusting ETA during pauses. Defaults to `NoPause()`.
     min_speed_kmh : float, optional
         Speed threshold below which ETA is set to NaN (stopped / near-stopped).
         Defaults to 5.0 km/h.
@@ -52,13 +59,16 @@ def backtest(
         Columns: time, distance_m, speed_ms, eta_remaining_s, ata_remaining_s, delta_s.
         delta_s = eta_remaining_s - ata_remaining_s (positive = overestimate).
     """
+    if pause_strategy is None:
+        pause_strategy = NoPause()
     if min_speed_kmh is None:
         min_speed_kmh = 5.0
     df = ride.df
     speed_ms = estimator.predict(ride)
     remaining_m = ride.distance - df["distance_m"]
     ata_s = (df["time"].iloc[-1] - df["time"]).dt.total_seconds()
-    eta_s = remaining_m / speed_ms.where(speed_ms >= min_speed_kmh / 3.6)
+    pause_s = pause_strategy.adjust(ride)
+    eta_s = remaining_m / speed_ms.where(speed_ms >= min_speed_kmh / 3.6) + pause_s
     return pd.DataFrame(
         {
             "time": df["time"].values,

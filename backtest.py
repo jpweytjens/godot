@@ -8,6 +8,7 @@ from tqdm.contrib.concurrent import process_map
 
 from eta.benchmark import backtest, compute_metrics
 from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from eta.pause import AddCurrentPause, NoPause
 from eta.plot import (
     comparison_errors,
     error_refs,
@@ -58,19 +59,27 @@ _TABLE_STYLES = [
 ]
 
 ESTIMATORS = {
-    "Average speed (moving)": AvgSpeedEstimator(moving_only=True),
-    "Average speed (total)": AvgSpeedEstimator(moving_only=False),
-    # "Rolling 1 min (moving)": RollingAvgSpeedEstimator(window_s=60, moving_only=True),
-    # "Rolling 1 min (total)": RollingAvgSpeedEstimator(window_s=60, moving_only=False),
-    "Rolling 5 min (moving)": RollingAvgSpeedEstimator(window_s=300, moving_only=True),
-    "Rolling 5 min (total)": RollingAvgSpeedEstimator(window_s=300, moving_only=False),
-    # "Rolling 10 min (moving)": RollingAvgSpeedEstimator(window_s=600, moving_only=True),
-    # "Rolling 10 min (total)": RollingAvgSpeedEstimator(window_s=600, moving_only=False),
-    "Rolling 30 min (moving)": RollingAvgSpeedEstimator(
-        window_s=1800, moving_only=True
+    "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), AddCurrentPause()),
+    "Average speed (total)": (AvgSpeedEstimator(moving_only=False), NoPause()),
+    # "Rolling 1 min (moving)": (RollingAvgSpeedEstimator(window_s=60, moving_only=True), AddCurrentPause()),
+    # "Rolling 1 min (total)": (RollingAvgSpeedEstimator(window_s=60, moving_only=False), NoPause()),
+    "Rolling 5 min (moving)": (
+        RollingAvgSpeedEstimator(window_s=300, moving_only=True),
+        AddCurrentPause(),
     ),
-    "Rolling 30 min (total)": RollingAvgSpeedEstimator(
-        window_s=1800, moving_only=False
+    "Rolling 5 min (total)": (
+        RollingAvgSpeedEstimator(window_s=300, moving_only=False),
+        NoPause(),
+    ),
+    # "Rolling 10 min (moving)": (RollingAvgSpeedEstimator(window_s=600, moving_only=True), AddCurrentPause()),
+    # "Rolling 10 min (total)": (RollingAvgSpeedEstimator(window_s=600, moving_only=False), NoPause()),
+    "Rolling 30 min (moving)": (
+        RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
+        AddCurrentPause(),
+    ),
+    "Rolling 30 min (total)": (
+        RollingAvgSpeedEstimator(window_s=1800, moving_only=False),
+        NoPause(),
     ),
 }
 
@@ -101,7 +110,9 @@ def run(
         and per-estimator MAE/RMSE columns.
     """
     ride = load_ride(gpx_path, distance_method, smooth_speed, smooth_window)
-    results = {name: backtest(ride, est) for name, est in ESTIMATORS.items()}
+    results = {
+        name: backtest(ride, est, pause) for name, (est, pause) in ESTIMATORS.items()
+    }
 
     out_dir = Path("output") / "backtests" / ride.name
     out_dir.mkdir(parents=True, exist_ok=True)
