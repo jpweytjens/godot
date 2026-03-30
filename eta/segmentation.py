@@ -1,6 +1,7 @@
-"""Route segmentation: decimation, RDP simplification, gradient segments."""
+"""Route segmentation: decimation, RDP/VW simplification, gradient segments."""
 
 import bisect
+import heapq
 from dataclasses import dataclass
 
 import numpy as np
@@ -115,6 +116,81 @@ def ramer_douglas_peucker(
         right = ramer_douglas_peucker(points[idx:], epsilon)
         return left[:-1] + right
     return [points[0], points[-1]]
+
+
+def _triangle_area(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+) -> float:
+    """Unsigned area of triangle (a, b, c) via the shoelace formula."""
+    return 0.5 * abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]))
+
+
+def visvalingam_whyatt(
+    points: list[tuple[float, float]],
+    min_area: float,
+) -> list[tuple[float, float]]:
+    """Simplify a polyline using the Visvalingam–Whyatt algorithm.
+
+    Iteratively removes the interior point whose triangle (with its
+    two neighbors) has the smallest effective area, until all remaining
+    triangles exceed `min_area`.
+
+    Parameters
+    ----------
+    points : list of (float, float)
+        Input polyline as (x, y) pairs.
+    min_area : float
+        Minimum effective triangle area to retain a point.
+
+    Returns
+    -------
+    list of (float, float)
+        Simplified polyline. First and last points are always kept.
+    """
+    n = len(points)
+    if n < 3:
+        return list(points)
+
+    # Doubly-linked list via prev/next arrays
+    prev_idx = list(range(-1, n - 1))
+    next_idx = list(range(1, n + 1))
+    next_idx[-1] = -1  # sentinel
+
+    removed = [False] * n
+    counter = 0  # tie-breaker for heap stability
+    heap: list[tuple[float, float, int]] = []
+
+    for i in range(1, n - 1):
+        area = _triangle_area(points[prev_idx[i]], points[i], points[next_idx[i]])
+        heapq.heappush(heap, (area, counter, i))
+        counter += 1
+
+    while heap:
+        area, _, idx = heapq.heappop(heap)
+        if removed[idx]:
+            continue
+        if area >= min_area:
+            break
+
+        removed[idx] = True
+        p, nx = prev_idx[idx], next_idx[idx]
+        next_idx[p] = nx
+        prev_idx[nx] = p
+
+        # Recompute neighbors — effective area never shrinks (VW property)
+        for neighbor in (p, nx):
+            if prev_idx[neighbor] == -1 or next_idx[neighbor] == -1:
+                continue
+            new_area = _triangle_area(
+                points[prev_idx[neighbor]], points[neighbor], points[next_idx[neighbor]]
+            )
+            new_area = max(new_area, area)
+            heapq.heappush(heap, (new_area, counter, neighbor))
+            counter += 1
+
+    return [p for p, r in zip(points, removed) if not r]
 
 
 def merge_short_segments(

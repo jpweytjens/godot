@@ -18,6 +18,7 @@ from eta.plot import (
     speed_comparison,
 )
 from eta.ride import Ride, load_ride, compute_global_prior
+from eta.segmentation import visvalingam_whyatt
 
 
 __all__ = [
@@ -29,6 +30,8 @@ __all__ = [
     "Ride",
     "load_ride",
     "compute_global_prior",
+    # segmentation
+    "visvalingam_whyatt",
     # estimators
     "BaseEstimator",
     "AvgSpeedEstimator",
