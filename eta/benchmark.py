@@ -37,7 +37,6 @@ def backtest(
     ride: Ride,
     estimator: Estimator,
     pause_strategy: PauseStrategy | None = None,
-    min_speed_kmh: float | None = None,
 ) -> pd.DataFrame:
     """Run an estimator over a ride and record ETA vs ATA.
 
@@ -49,9 +48,6 @@ def backtest(
         Estimator implementing predict().
     pause_strategy : PauseStrategy, optional
         Strategy for adjusting ETA during pauses. Defaults to `NoPause()`.
-    min_speed_kmh : float, optional
-        Speed threshold below which ETA is set to NaN (stopped / near-stopped).
-        Defaults to 5.0 km/h.
 
     Returns
     -------
@@ -61,14 +57,12 @@ def backtest(
     """
     if pause_strategy is None:
         pause_strategy = NoPause()
-    if min_speed_kmh is None:
-        min_speed_kmh = 5.0
     df = ride.df
     speed_ms = estimator.predict(ride)
     remaining_m = ride.distance - df["distance_m"]
     ata_s = (df["time"].iloc[-1] - df["time"]).dt.total_seconds()
     pause_s = pause_strategy.adjust(ride)
-    eta_s = remaining_m / speed_ms.where(speed_ms >= min_speed_kmh / 3.6) + pause_s
+    eta_s = remaining_m / speed_ms + pause_s
     return pd.DataFrame(
         {
             "time": df["time"].values,
