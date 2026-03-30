@@ -127,8 +127,12 @@ class TestRollingAvgSpeedEstimator:
         speeds = [20.0] * 10 + [0.0] * 10
         ride = make_ride(ts, dist, speeds)
 
-        moving = RollingAvgSpeedEstimator(window_s=300, moving_only=True).predict(ride)
-        total = RollingAvgSpeedEstimator(window_s=300, moving_only=False).predict(ride)
+        moving = RollingAvgSpeedEstimator(
+            window_s=300, moving_only=True, min_periods=1
+        ).predict(ride)
+        total = RollingAvgSpeedEstimator(
+            window_s=300, moving_only=False, min_periods=1
+        ).predict(ride)
 
         # After stop, moving-only should still reflect the moving speed
         assert moving.iloc[-1] > total.iloc[-1]

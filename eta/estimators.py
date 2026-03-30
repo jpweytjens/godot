@@ -77,15 +77,21 @@ class RollingAvgSpeedEstimator(BaseEstimator):
         Rolling window in seconds. Defaults to ROLLING_WINDOW_S (300 s).
     moving_only : bool, optional
         If True (default), only accumulate distance and time while moving.
+    min_periods : int, optional
+        Minimum number of non-NaN observations required in the window.
+        Defaults to `window_s` (i.e. a full window of data). Prevents
+        unreliable estimates from thin post-pause windows.
     """
 
     def __init__(
         self,
         window_s: float | None = None,
         moving_only: bool = True,
+        min_periods: int | None = None,
     ) -> None:
         self._window_s = ROLLING_WINDOW_S if window_s is None else window_s
         self._moving_only = moving_only
+        self._min_periods = int(self._window_s) if min_periods is None else min_periods
 
     def __str__(self) -> str:
         mode = "moving" if self._moving_only else "elapsed"
@@ -94,7 +100,8 @@ class RollingAvgSpeedEstimator(BaseEstimator):
     def __repr__(self) -> str:
         return (
             f"RollingAvgSpeedEstimator(window_s={self._window_s!r}, "
-            f"moving_only={self._moving_only!r})"
+            f"moving_only={self._moving_only!r}, "
+            f"min_periods={self._min_periods!r})"
         )
 
     def predict(self, ride: Ride) -> pd.Series:
@@ -102,10 +109,17 @@ class RollingAvgSpeedEstimator(BaseEstimator):
         dd = df["delta_distance"]
         dt = df["delta_time"]
         if self._moving_only:
-            moving = (~df["paused"]).astype(float)
-            dd, dt = dd * moving, dt * moving
+            dd, dt = dd.where(~df["paused"]), dt.where(~df["paused"])
         idx = pd.DatetimeIndex(df["time"])
         window = f"{int(self._window_s)}s"
-        dd_roll = pd.Series(dd.values, index=idx).rolling(window, min_periods=1).sum()
-        dt_roll = pd.Series(dt.values, index=idx).rolling(window, min_periods=1).sum()
+        dd_roll = (
+            pd.Series(dd.values, index=idx)
+            .rolling(window, min_periods=self._min_periods)
+            .sum()
+        )
+        dt_roll = (
+            pd.Series(dt.values, index=idx)
+            .rolling(window, min_periods=self._min_periods)
+            .sum()
+        )
         return pd.Series(self.safe_divide(dd_roll, dt_roll).values, index=df.index)

@@ -83,12 +83,13 @@ class TestSafeDivide:
         assert deep_pause.isna().all(), "deep pause rows should be NaN"
 
     def test_moving_rows_are_finite(self):
-        """Non-paused rows (after first) should have finite positive speed."""
-        ride = make_ride_with_pause(moving_points=50, pause_points=120)
+        """Non-paused rows with a full window should have finite positive speed."""
+        ride = make_ride_with_pause(moving_points=100, pause_points=120)
         est = RollingAvgSpeedEstimator(window_s=60, moving_only=True)
         result = est.predict(ride)
         pause_mask = ride.df["paused"]
-        moving = result[~pause_mask].iloc[1:]  # skip first row (no prior data)
+        moving = result[~pause_mask].dropna()
 
+        assert len(moving) > 0, "should have some non-NaN moving rows"
         assert (moving > 0).all(), "moving rows should have positive speed"
         assert np.isfinite(moving).all(), "moving rows should be finite"
