@@ -15,6 +15,11 @@ ROLLING_WINDOW_S = 300.0
 class BaseEstimator:
     """Base for ETA estimators. Subclasses must implement `predict`."""
 
+    @staticmethod
+    def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+        """Element-wise division, returning NaN where `denominator` <= 0."""
+        return (numerator / denominator).where(denominator > 0)
+
     def predict(self, ride: Ride) -> pd.Series:
         """Return estimated speed in m/s at each row.
 
@@ -60,7 +65,7 @@ class AvgSpeedEstimator(BaseEstimator):
             dd, dt = dd * moving, dt * moving
         cum_dd = dd.cumsum()
         cum_dt = dt.cumsum()
-        return (cum_dd / cum_dt).where(cum_dt > 0)
+        return self.safe_divide(cum_dd, cum_dt)
 
 
 class RollingAvgSpeedEstimator(BaseEstimator):
@@ -103,4 +108,4 @@ class RollingAvgSpeedEstimator(BaseEstimator):
         window = f"{int(self._window_s)}s"
         dd_roll = pd.Series(dd.values, index=idx).rolling(window, min_periods=1).sum()
         dt_roll = pd.Series(dt.values, index=idx).rolling(window, min_periods=1).sum()
-        return pd.Series((dd_roll / dt_roll).values, index=df.index)
+        return pd.Series(self.safe_divide(dd_roll, dt_roll).values, index=df.index)
