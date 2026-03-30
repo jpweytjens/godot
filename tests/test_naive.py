@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
 
 
 def make_ride(timestamps_ms, distances_m, speeds_kmh):

@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from benchmark import backtest
+from eta.benchmark import backtest
 
 
 class ConstantSpeedEstimator:

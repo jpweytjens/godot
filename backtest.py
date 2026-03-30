@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
-from benchmark import backtest
-from estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
-from gpx import (
+from eta.benchmark import backtest
+from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from eta.gpx import (
     add_haversine_distance,
     add_integrated_distance,
     add_smooth_speed,
@@ -19,7 +19,7 @@ from gpx import (
     read_gpx,
 )
 
-from plot import plot_comparison, plot_delta, plot_speed
+from eta.plot import plot_comparison, plot_delta, plot_speed
 
 _N_INFO_COLS = 5  # ride, distance_method, speed_smoothed, route_type, contains_pauses
 

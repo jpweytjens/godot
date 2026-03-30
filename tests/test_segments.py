@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from segmentation import (
+from eta.segmentation import (
     decimate,
     perpendicular_distance,
     ramer_douglas_peucker,
