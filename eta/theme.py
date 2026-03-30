@@ -55,6 +55,7 @@ COLORS = TOL_BRIGHT
 def eta_theme() -> alt.theme.ThemeConfig:
     """Minimal theme: no grid, no view border, reduced data-ink."""
     return {
+        "padding": {"left": 50, "right": 10, "top": 10, "bottom": 10},
         "config": {
             "view": {"stroke": None},
             "axis": {
@@ -64,19 +65,21 @@ def eta_theme() -> alt.theme.ThemeConfig:
                 "ticks": True,
                 "tickColor": "#888",
                 "tickSize": 4,
-                "labelFont": "system-ui",
+                "labelColor": "#333",
+                "labelFont": "Helvetica, Arial, sans-serif",
                 "labelFontSize": 11,
-                "titleFont": "system-ui",
+                "titleColor": "#333",
+                "titleFont": "Helvetica, Arial, sans-serif",
                 "titleFontSize": 12,
                 "titleFontWeight": "normal",
             },
             "title": {
-                "font": "system-ui",
+                "font": "Helvetica, Arial, sans-serif",
                 "fontSize": 13,
                 "fontWeight": "normal",
                 "anchor": "start",
             },
             "legend": {"disable": True},
             "range": {"category": TOL_BRIGHT},
-        }
+        },
     }

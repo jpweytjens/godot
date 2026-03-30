@@ -204,15 +204,15 @@ def run(
             pause_bands(pauses),
             eta_error(result_prepped),
             error_refs(),
-        ).properties(title="ETA error", width=500, height=250)
+        ).properties(width=800, height=200)
 
         speed_chart = alt.layer(
             pause_bands(pauses),
             speed_actual(ride_prepped),
             speed_estimated(result_prepped),
-        ).properties(title="Speed", width=500, height=250)
+        ).properties(width=800, height=200)
 
-        chart = (error_chart | speed_chart).properties(
+        chart = (error_chart & speed_chart).properties(
             title=alt.Title(f"{name} \u2014 {ride_name}")
         )
         safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
