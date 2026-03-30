@@ -154,27 +154,33 @@ def eta_countdown(result_df: pd.DataFrame) -> alt.Chart:
 def speed_comparison(ride_df: pd.DataFrame, result_df: pd.DataFrame) -> alt.Chart:
     """Actual vs estimated speed with legend."""
     est_df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
+    elapsed_s = (ride_df["time"] - ride_df["time"].iloc[0]).dt.total_seconds()
+    naive_kmh = (ride_df["distance_m"] / elapsed_s) * 3.6
     combined = pd.concat(
         [
             ride_df[["elapsed_min", "speed_kmh"]].assign(series="Actual"),
             est_df[["elapsed_min", "speed_kmh"]].assign(series="Estimated"),
+            ride_df[["elapsed_min"]].assign(speed_kmh=naive_kmh, series="Naive avg"),
         ],
         ignore_index=True,
     )
+    series = ["Actual", "Estimated", "Naive avg"]
     return (
         alt.Chart(combined)
         .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
         .encode(
             x=X_ELAPSED,
-            y=alt.Y("speed_kmh:Q").title("Speed (km/h)"),
+            y=alt.Y("speed_kmh:Q")
+            .title("Speed (km/h)")
+            .scale(domain=[0, 40], clamp=True),
             color=alt.Color("series:N")
-            .scale(domain=["Actual", "Estimated"], range=["#888", TOL_VIBRANT[5]])
+            .scale(domain=series, range=["#888", TOL_VIBRANT[5], TOL_BRIGHT[3]])
             .legend(alt.Legend(title=None, orient="top-right")),
             opacity=alt.Opacity("series:N")
-            .scale(domain=["Actual", "Estimated"], range=[0.4, 1.0])
+            .scale(domain=series, range=[0.4, 1.0, 1.0])
             .legend(None),
             strokeWidth=alt.StrokeWidth("series:N")
-            .scale(domain=["Actual", "Estimated"], range=[0.6, 1.5])
+            .scale(domain=series, range=[0.6, 1.5, 1.5])
             .legend(None),
         )
     )
