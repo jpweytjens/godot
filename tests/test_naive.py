@@ -34,7 +34,6 @@ def make_ride(timestamps_ms, distances_m, speeds_kmh, paused=None):
         df=df,
         route_type="flat",
         contains_pauses=paused_arr.any(),
-        pauses=pd.DataFrame(columns=["start_min", "end_min"]),
         distance_method="haversine",
         speed_smoothed=False,
         distance=total_dist,

@@ -125,13 +125,13 @@ def run(
         result_prepped = prep_time_axis(result, warmup_pct=0.02)
 
         error_chart = alt.layer(
-            pause_bands(ride.pauses),
+            pause_bands(ride_prepped),
             eta_error(result_prepped),
             error_refs(),
         ).properties(width=800, height=200)
 
         speed_chart = alt.layer(
-            pause_bands(ride.pauses),
+            pause_bands(ride_prepped),
             speed_comparison(ride_prepped, result_prepped),
         ).properties(width=800, height=200)
 
@@ -143,7 +143,7 @@ def run(
 
     # Comparison: all estimators' ETA error on one chart
     comp_chart = alt.layer(
-        pause_bands(ride.pauses),
+        pause_bands(ride_prepped),
         comparison_errors(results, warmup_pct=0.02),
         error_refs(),
     ).properties(

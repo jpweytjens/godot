@@ -36,7 +36,6 @@ def make_synthetic_ride(
         df=df,
         route_type="flat",
         contains_pauses=False,
-        pauses=pd.DataFrame(columns=["start_min", "end_min"]),
         distance_method="haversine",
         speed_smoothed=False,
         distance=total_m,

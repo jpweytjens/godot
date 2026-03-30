@@ -13,7 +13,7 @@ from eta.gpx import (
     pause_run_id,
     read_gpx,
 )
-from eta.plot import pause_intervals, prep_time_axis
+from eta.plot import prep_time_axis
 
 _DISTANCE_PIPES = {
     "haversine": add_haversine_distance,
@@ -39,8 +39,6 @@ class Ride:
         `"mountain"`.
     contains_pauses : bool
         Whether the ride contains pauses >= 60 s.
-    pauses : pd.DataFrame
-        Pause intervals with `start_min` and `end_min` columns.
     distance_method : str
         Distance pipeline used: `"haversine"` or `"integrated"`.
     speed_smoothed : bool
@@ -60,7 +58,6 @@ class Ride:
     df: pd.DataFrame
     route_type: str
     contains_pauses: bool
-    pauses: pd.DataFrame
     distance_method: str
     speed_smoothed: bool
     distance: float
@@ -213,7 +210,6 @@ def load_ride(
         df=df,
         route_type=classify_route(df),
         contains_pauses=has_pauses(df),
-        pauses=pause_intervals(df),
         distance_method=distance_method,
         speed_smoothed=smooth_speed,
         distance=distance,

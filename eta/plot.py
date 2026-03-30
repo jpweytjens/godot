@@ -33,28 +33,14 @@ def prep_time_axis(df: pd.DataFrame, warmup_pct: float | None = None) -> pd.Data
     return df.assign(elapsed_min=(df["time"] - t0).dt.total_seconds() / 60)
 
 
-def pause_intervals(ride_df: pd.DataFrame, min_pause_s: float = 60.0) -> pd.DataFrame:
-    """Convert paused column into a DataFrame of pause intervals.
-
-    Parameters
-    ----------
-    ride_df : pd.DataFrame
-        Ride DataFrame with paused, time, and elapsed_min columns.
-        Must have been processed by `prep_time_axis` first.
-    min_pause_s : float, optional
-        Minimum pause duration in seconds to include. Default 60.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: start_min, end_min. One row per pause interval.
-    """
-    if "paused" not in ride_df.columns:
+def _pause_intervals(df: pd.DataFrame, min_pause_s: float = 60.0) -> pd.DataFrame:
+    """Build pause interval bounds from a DataFrame with `paused` and `elapsed_min`."""
+    if "paused" not in df.columns:
         return pd.DataFrame(columns=["start_min", "end_min"])
-    is_paused = ride_df["paused"]
+    is_paused = df["paused"]
     run_id = pause_run_id(is_paused)
     intervals = []
-    for _, grp in ride_df[is_paused].groupby(run_id[is_paused]):
+    for _, grp in df[is_paused].groupby(run_id[is_paused]):
         dur_s = (grp["time"].iloc[-1] - grp["time"].iloc[0]).total_seconds()
         if dur_s >= min_pause_s:
             intervals.append(
@@ -73,10 +59,19 @@ def pause_intervals(ride_df: pd.DataFrame, min_pause_s: float = 60.0) -> pd.Data
 X_ELAPSED = alt.X("elapsed_min:Q").title("Elapsed time (min)")
 
 
-def pause_bands(pauses_df: pd.DataFrame) -> alt.Chart:
-    """Blue semi-transparent bands for paused sections."""
+def pause_bands(df: pd.DataFrame, min_pause_s: float = 10.0) -> alt.Chart:
+    """Blue semi-transparent bands for paused sections.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Ride DataFrame with `paused`, `time`, and `elapsed_min` columns.
+    min_pause_s : float, optional
+        Minimum pause duration in seconds to show. Default 10.
+    """
+    intervals = _pause_intervals(df, min_pause_s)
     return (
-        alt.Chart(pauses_df)
+        alt.Chart(intervals)
         .mark_rect(opacity=0.15, color=TOL_BRIGHT[0])
         .encode(x="start_min:Q", x2="end_min:Q")
     )
