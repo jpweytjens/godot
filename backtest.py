@@ -15,6 +15,7 @@ from gpx import (
     add_haversine_distance,
     add_integrated_distance,
     add_smooth_speed,
+    fill_pauses,
     read_gpx,
 )
 
@@ -115,35 +116,31 @@ def classify_route(
 
 def has_pauses(
     df: pd.DataFrame,
-    pause_kmh: float = 1.0,
     min_pause_s: float = 60.0,
 ) -> bool:
     """Return True if the ride contains at least one pause long enough to matter.
 
-    A pause is a consecutive run of points where speed is below ``pause_kmh``.
-    Only runs lasting at least ``min_pause_s`` seconds are counted.
+    Requires a ``paused`` boolean column produced by ``fill_pauses``.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Ride DataFrame with speed_kmh and time columns.
-    pause_kmh : float, optional
-        Speed threshold below which a point is considered stopped. Default 1.0.
+        Ride DataFrame with paused and time columns.
     min_pause_s : float, optional
-        Minimum duration (seconds) for a slow run to count as a pause. Default 60.
+        Minimum duration (seconds) for a paused run to count. Default 60.
 
     Returns
     -------
     bool
     """
-    is_slow = df["speed_kmh"] < pause_kmh
-    run_id = (is_slow != is_slow.shift()).cumsum()
-    slow_durations = (
-        df[is_slow]
-        .groupby(run_id[is_slow])["time"]
+    is_paused = df["paused"]
+    run_id = (is_paused != is_paused.shift()).cumsum()
+    pause_durations = (
+        df[is_paused]
+        .groupby(run_id[is_paused])["time"]
         .agg(lambda t: (t.iloc[-1] - t.iloc[0]).total_seconds())
     )
-    return bool(len(slow_durations) > 0 and slow_durations.max() >= min_pause_s)
+    return bool(len(pause_durations) > 0 and pause_durations.max() >= min_pause_s)
 
 
 _DISTANCE_PIPES = {
@@ -176,7 +173,7 @@ def run(
     """
     if distance_method not in _DISTANCE_PIPES:
         raise ValueError(f"distance_method must be one of {list(_DISTANCE_PIPES)}")
-    df = read_gpx(gpx_path).pipe(_DISTANCE_PIPES[distance_method])
+    df = read_gpx(gpx_path).pipe(_DISTANCE_PIPES[distance_method]).pipe(fill_pauses)
     if smooth_speed:
         df = add_smooth_speed(df)
     else:

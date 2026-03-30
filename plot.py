@@ -70,13 +70,14 @@ def _draw_pause_bands(
     ax: Axes,
     ride_clipped: pd.DataFrame,
     t0: pd.Timestamp,
-    pause_kmh: float,
     min_pause_s: float,
 ) -> None:
     """Shade paused sections as full-height TOL-blue bands in time space."""
-    is_slow = ride_clipped["speed_kmh"] < pause_kmh
-    run_id = (is_slow != is_slow.shift()).cumsum()
-    for _, group in ride_clipped[is_slow].groupby(run_id[is_slow]):
+    if "paused" not in ride_clipped.columns:
+        return
+    is_paused = ride_clipped["paused"]
+    run_id = (is_paused != is_paused.shift()).cumsum()
+    for _, group in ride_clipped[is_paused].groupby(run_id[is_paused]):
         duration_s = (group["time"].iloc[-1] - group["time"].iloc[0]).total_seconds()
         if duration_s >= min_pause_s:
             ax.axvspan(
@@ -347,7 +348,7 @@ def plot_delta(
 
     if ride_df is not None and x_axis == "time":
         ride_clipped = _clip(ride_df, warmup_pct)
-        _draw_pause_bands(ax, ride_clipped, r["time"].iloc[0], 1.0, 60.0)
+        _draw_pause_bands(ax, ride_clipped, r["time"].iloc[0], 60.0)
 
     ax.plot(x, r["delta_s"] / 60, color=TOL_VIBRANT[5], linewidth=1.2)
     ax.axhline(5, linestyle="--", color="#BBBBBB", linewidth=1, label="+5 min")
@@ -420,7 +421,7 @@ def plot_speed(
         if x_axis == "time":
             t0_ride = ride_clipped["time"].iloc[0]
             x_ride = (ride_clipped["time"] - t0_ride).dt.total_seconds() / 60
-            _draw_pause_bands(ax, ride_clipped, t0_ride, pause_kmh, min_pause_s)
+            _draw_pause_bands(ax, ride_clipped, t0_ride, min_pause_s)
         else:
             x_ride = ride_clipped["distance_m"] / 1000
 

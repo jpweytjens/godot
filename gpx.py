@@ -101,6 +101,32 @@ def add_integrated_distance(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(distance_m=step.cumsum())
 
 
+def fill_pauses(df: pd.DataFrame) -> pd.DataFrame:
+    """Resample to 1-second frequency, filling gaps left by auto-pause.
+
+    Inserted rows get ``speed_ms = 0`` and a ``paused = True`` flag.
+    Lat, lon, elevation, and distance are forward-filled from the last
+    recorded point.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Ride DataFrame with a time column (1-second recording interval).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame at 1-second frequency with a ``paused`` boolean column.
+    """
+    out = df.set_index("time").asfreq("1s")
+    out["paused"] = out["lat"].isna()
+    out[["lat", "lon", "elevation_m"]] = out[["lat", "lon", "elevation_m"]].ffill()
+    if "distance_m" in out.columns:
+        out["distance_m"] = out["distance_m"].ffill()
+    out["speed_ms"] = out["speed_ms"].fillna(0.0)
+    return out.reset_index()
+
+
 def add_smooth_speed(
     df: pd.DataFrame,
     window: str = "5s",

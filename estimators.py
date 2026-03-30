@@ -37,18 +37,23 @@ class BaseEstimator:
         return dd, dt
 
     def _moving_mask(self, df: pd.DataFrame) -> pd.Series:
-        """Return a float mask that is 1.0 while moving (speed >= 1 km/h), else 0.0.
+        """Return a float mask that is 1.0 while moving, else 0.0.
+
+        Uses the ``paused`` column produced by ``fill_pauses`` when available,
+        otherwise falls back to the speed threshold.
 
         Parameters
         ----------
         df : pd.DataFrame
-            Ride DataFrame with speed_kmh column.
+            Ride DataFrame with speed_kmh column and optionally paused column.
 
         Returns
         -------
         pd.Series
             Float mask aligned with df's index.
         """
+        if "paused" in df.columns:
+            return (~df["paused"]).astype(float)
         return (df["speed_kmh"] >= self._pause_kmh).astype(float)
 
     def _datetime_index(self, df: pd.DataFrame):
