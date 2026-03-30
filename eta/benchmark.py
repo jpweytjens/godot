@@ -59,10 +59,10 @@ def backtest(
         pause_strategy = NoPause()
     df = ride.df
     speed_ms = estimator.predict(ride)
+    speed_ms = pause_strategy.adjust(speed_ms, ride)
     remaining_m = ride.distance - df["distance_m"]
     ata_s = (df["time"].iloc[-1] - df["time"]).dt.total_seconds()
-    pause_s = pause_strategy.adjust(ride)
-    eta_s = remaining_m / speed_ms + pause_s
+    eta_s = remaining_m / speed_ms
     return pd.DataFrame(
         {
             "time": df["time"].values,
