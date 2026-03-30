@@ -92,9 +92,8 @@ class TestAvgSpeedEstimator:
         speed_moving = AvgSpeedEstimator(moving_only=True).predict(ride)
         speed_total = AvgSpeedEstimator(moving_only=False).predict(ride)
         assert speed_moving.isna().all()
-        # total: cum_dd=0 always → 0/dt = 0
-        # First row is NaN (no prior point); rest are 0/dt = 0
-        assert speed_total.iloc[1:].eq(0).all()
+        # total: cum_dd=0 always → NaN (zero distance = effectively paused)
+        assert speed_total.isna().all()
 
 
 class TestRollingAvgSpeedEstimator:

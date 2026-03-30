@@ -17,8 +17,8 @@ class BaseEstimator:
 
     @staticmethod
     def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
-        """Element-wise division, returning NaN where `denominator` <= 0."""
-        return (numerator / denominator).where(denominator > 0)
+        """Element-wise division, returning NaN where either operand is zero."""
+        return (numerator / denominator).where((denominator != 0) & (numerator != 0))
 
     def predict(self, ride: Ride) -> pd.Series:
         """Return estimated speed in m/s at each row.
