@@ -257,16 +257,29 @@ def compute_global_prior(
     float
         Speed in m/s.
     """
-    rides = process_map(
-        load_ride,
+    results = process_map(
+        _safe_load_ride,
         gpx_paths,
         [distance_method] * len(gpx_paths),
-        [False] * len(gpx_paths),
         desc="Loading rides",
         unit="file",
     )
+    rides = [r for r in results if r is not None]
+    failed = len(results) - len(rides)
+    if failed:
+        logger.warning(f"{failed}/{len(results)} files failed to load")
+    if not rides:
+        raise ValueError("No rides loaded successfully")
     total_dist = sum(r.distance for r in rides)
     total_move_time = sum(r.ride_time for r in rides)
     prior = total_dist / total_move_time
     logger.info(f"Global prior: {prior:.2f} m/s ({prior * 3.6:.1f} km/h)")
     return prior
+
+
+def _safe_load_ride(path: Path, distance_method: str) -> Ride | None:
+    try:
+        return load_ride(path, distance_method, smooth_speed=False)
+    except Exception:
+        logger.error(f"Failed to load {path}")
+        return None
