@@ -3,6 +3,7 @@
 import altair as alt
 import pandas as pd
 
+from eta.gpx import pause_run_id
 from eta.theme import COLORS, TOL_BRIGHT, TOL_MUTED, TOL_VIBRANT
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ def pause_intervals(ride_df: pd.DataFrame, min_pause_s: float = 60.0) -> pd.Data
     if "paused" not in ride_df.columns:
         return pd.DataFrame(columns=["start_min", "end_min"])
     is_paused = ride_df["paused"]
-    run_id = (is_paused != is_paused.shift()).cumsum()
+    run_id = pause_run_id(is_paused)
     intervals = []
     for _, grp in ride_df[is_paused].groupby(run_id[is_paused]):
         dur_s = (grp["time"].iloc[-1] - grp["time"].iloc[0]).total_seconds()
@@ -95,7 +96,9 @@ def speed_estimated(result_df: pd.DataFrame) -> alt.Chart:
     df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
     return (
         alt.Chart(df)
-        .mark_line(strokeWidth=1.5, color=TOL_VIBRANT[5])
+        .mark_line(
+            strokeWidth=1.5, color=TOL_VIBRANT[5], invalid="break-paths-filter-domains"
+        )
         .encode(x=X_ELAPSED, y=alt.Y("speed_kmh:Q").title("Speed (km/h)"))
     )
 
@@ -105,7 +108,9 @@ def eta_error(result_df: pd.DataFrame) -> alt.Chart:
     df = result_df.assign(delta_min=result_df["delta_s"] / 60)
     return (
         alt.Chart(df)
-        .mark_line(strokeWidth=1.2, color=TOL_VIBRANT[5])
+        .mark_line(
+            strokeWidth=1.2, color=TOL_VIBRANT[5], invalid="break-paths-filter-domains"
+        )
         .encode(x=X_ELAPSED, y=alt.Y("delta_min:Q").title("ETA \u2212 ATA (min)"))
     )
 
@@ -140,7 +145,7 @@ def eta_countdown(result_df: pd.DataFrame) -> alt.Chart:
     )
     return (
         alt.Chart(combined)
-        .mark_line(strokeWidth=1.2)
+        .mark_line(strokeWidth=1.2, invalid="break-paths-filter-domains")
         .encode(
             x=X_ELAPSED,
             y=alt.Y("remaining_min:Q").title("Time remaining (min)"),
@@ -163,7 +168,7 @@ def speed_comparison(ride_df: pd.DataFrame, result_df: pd.DataFrame) -> alt.Char
     )
     return (
         alt.Chart(combined)
-        .mark_line(strokeWidth=1)
+        .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
         .encode(
             x=X_ELAPSED,
             y=alt.Y("speed_kmh:Q").title("Speed (km/h)"),
@@ -192,7 +197,7 @@ def comparison_errors(
     palette = TOL_MUTED if len(results) > len(COLORS) else COLORS
     return (
         alt.Chart(combined)
-        .mark_line(strokeWidth=1.2)
+        .mark_line(strokeWidth=1.2, invalid="break-paths-filter-domains")
         .encode(
             x=X_ELAPSED,
             y=alt.Y("delta_min:Q").title("ETA \u2212 ATA (min)"),
