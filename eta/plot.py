@@ -3,7 +3,10 @@
 import altair as alt
 import pandas as pd
 
+from eta.gradient import gradient_bin
 from eta.gpx import pause_run_id
+from eta.palettes import GRADIENT_COLORS
+from eta.segmentation import decimate_to_gradient_segments
 from eta.theme import COLORS, TOL_BRIGHT, TOL_MUTED, TOL_VIBRANT
 
 # ---------------------------------------------------------------------------
@@ -267,4 +270,91 @@ def comparison_errors(
             .scale(range=palette[: len(results)])
             .legend(alt.Legend(title=None, orient="top-right")),
         )
+    )
+
+
+def elevation_profile(
+    ride_name: str,
+    df: pd.DataFrame,
+    min_area: float = 5000.0,
+    min_length_m: float = 200.0,
+) -> alt.Chart:
+    """Two-row chart: original elevation profile + gradient-colored segments.
+
+    Parameters
+    ----------
+    ride_name : str
+        Display name for the chart title.
+    df : pd.DataFrame
+        Ride DataFrame with `distance_m` and `elevation_m` columns.
+    min_area : float
+        Visvalingam-Whyatt minimum triangle area.
+    min_length_m : float
+        Minimum segment length in meters after merging.
+    """
+    points, segments = decimate_to_gradient_segments(df, min_area, min_length_m)
+
+    # Build long-form plotting DataFrame from segments
+    rows = []
+    for i, seg in enumerate(segments):
+        b = gradient_bin(seg.gradient)
+        label = f"{b:+d}%"
+        for j in (i, i + 1):
+            rows.append(
+                {
+                    "distance_km": points[j][0] / 1000,
+                    "elevation_m": points[j][1],
+                    "gradient_bin": label,
+                    "segment_id": i,
+                }
+            )
+    segments_df = pd.DataFrame(rows)
+
+    dist_km = df["distance_m"] / 1000
+    original = (
+        alt.Chart(
+            pd.DataFrame({"distance_km": dist_km, "elevation_m": df["elevation_m"]})
+        )
+        .mark_line(strokeWidth=0.8, color="#555")
+        .encode(
+            x=alt.X("distance_km:Q").title("Distance (km)"),
+            y=alt.Y("elevation_m:Q").title("Elevation (m)"),
+        )
+        .properties(
+            width=900,
+            height=200,
+            title=f"Original elevation profile ({len(df):,} points)",
+        )
+    )
+
+    n_points = len(segments) + 1
+    bin_labels = sorted(GRADIENT_COLORS.keys())
+    domain = [f"{b:+d}%" for b in bin_labels]
+    range_ = [GRADIENT_COLORS[b] for b in bin_labels]
+
+    segmented = (
+        alt.Chart(segments_df)
+        .mark_line(strokeWidth=2)
+        .encode(
+            x=alt.X("distance_km:Q").title("Distance (km)"),
+            y=alt.Y("elevation_m:Q").title("Elevation (m)"),
+            color=alt.Color(
+                "gradient_bin:N", scale=alt.Scale(domain=domain, range=range_)
+            )
+            .title("Gradient")
+            .legend(orient="right"),
+            detail="segment_id:N",
+        )
+        .properties(
+            width=900,
+            height=200,
+            title=f"VW-simplified — gradient bins (3%) ({n_points:,} points)",
+        )
+    )
+
+    return (
+        (original & segmented)
+        .resolve_scale(y="independent")
+        .properties(title=alt.Title(ride_name))
+        .configure_legend(disable=False)
     )

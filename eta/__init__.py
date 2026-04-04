@@ -13,12 +13,13 @@ from eta.gpx import (
 )
 from eta.plot import (
     comparison_errors,
+    elevation_profile,
     eta_countdown,
     eta_error,
     speed_comparison,
 )
 from eta.ride import Ride, load_ride, compute_global_prior
-from eta.segmentation import visvalingam_whyatt
+from eta.segmentation import decimate_to_gradient_segments, visvalingam_whyatt
 
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "load_ride",
     "compute_global_prior",
     # segmentation
+    "decimate_to_gradient_segments",
     "visvalingam_whyatt",
     # estimators
     "BaseEstimator",
@@ -45,6 +47,7 @@ __all__ = [
     "backtest",
     "compute_metrics",
     # plot
+    "elevation_profile",
     "eta_countdown",
     "eta_error",
     "speed_comparison",
