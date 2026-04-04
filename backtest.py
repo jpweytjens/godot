@@ -10,14 +10,10 @@ from eta.benchmark import backtest, compute_metrics
 from eta.estimators import (
     AdaptiveLerpSpeedEstimator,
     AvgSpeedEstimator,
-    DEWMASpeedEstimator,
-    EWMASpeedEstimator,
-    LerpSpeedEstimator,
-    PriorEWMASpeedEstimator,
-    RollingAvgSpeedEstimator,
-    RollingMedianSpeedEstimator,
+    NoisyOracleAdaptiveLerpEstimator,
+    OracleAdaptiveLerpEstimator,
 )
-from eta.pause import NoPause, SubtractElapsed
+from eta.pause import NoPause
 from eta.plot import (
     comparison_errors,
     error_pct_refs,
@@ -105,6 +101,16 @@ ESTIMATORS = {
         ),
         NoPause(),
     ),
+    "Adaptive lerp (oracle prior)": (
+        OracleAdaptiveLerpEstimator(tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15),
+        NoPause(),
+    ),
+    "Adaptive lerp (noisy prior)": (
+        NoisyOracleAdaptiveLerpEstimator(
+            tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15, cv=0.10, seed=42
+        ),
+        NoPause(),
+    ),
 }
 
 
@@ -134,35 +140,8 @@ def run(
         and per-estimator MAE/RMSE columns.
     """
     ride = load_ride(gpx_path, distance_method, smooth_speed, smooth_window)
-
-    # Oracle prior: actual moving average speed for this ride
-    df = ride.df
-    moving = ~df["paused"]
-    oracle_ms = float(
-        df.loc[moving, "delta_distance"].sum() / df.loc[moving, "delta_time"].sum()
-    )
-    # Noisy prior: sample from N(oracle, 10% CV) to simulate a good gradient estimate
-    rng = __import__("numpy").random.default_rng(42)
-    noisy_ms = float(rng.normal(oracle_ms, oracle_ms * 0.10))
-
-    oracle_estimators: dict[str, tuple] = {
-        "Adaptive lerp (oracle prior)": (
-            AdaptiveLerpSpeedEstimator(
-                prior_ms=oracle_ms, tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15
-            ),
-            NoPause(),
-        ),
-        "Adaptive lerp (noisy prior)": (
-            AdaptiveLerpSpeedEstimator(
-                prior_ms=noisy_ms, tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15
-            ),
-            NoPause(),
-        ),
-    }
-
     results = {
-        name: backtest(ride, est, pause)
-        for name, (est, pause) in {**ESTIMATORS, **oracle_estimators}.items()
+        name: backtest(ride, est, pause) for name, (est, pause) in ESTIMATORS.items()
     }
 
     out_dir = Path("output") / "backtests" / ride.name
@@ -316,166 +295,6 @@ if __name__ == "__main__":
         .reset_index(drop=True)
     )
 
-    # --- Metric metadata ---
-    _METRIC_META = {
-        "mae": {"suffix": "_mae", "label": "MAE", "fmt": "{:.2f}"},
-        "rmse": {"suffix": "_rmse", "label": "RMSE", "fmt": "{:.2f}"},
-        "mpe": {"suffix": "_mpe", "label": "MPE%", "fmt": "{:.1f}"},
-        "mape": {"suffix": "_mape", "label": "MAPE%", "fmt": "{:.1f}"},
-    }
-    selected_metrics = args.metrics
+    from eta.report import write_html_report
 
-    # Build col_to_name from actual result columns (covers oracle estimators too)
-    all_names = {
-        c[: -len(s)]
-        for m in _METRIC_META.values()
-        for s in [m["suffix"]]
-        for c in results_df.columns
-        if c.endswith(s)
-    }
-    col_to_name = {k: k.replace("_", " ").title() for k in all_names}
-    info_cols = [
-        "ride",
-        "distance_method",
-        "speed_smoothed",
-        "route_type",
-        "contains_pauses",
-    ]
-
-    # Collect columns per metric group, in display order
-    metric_groups: dict[str, list[str]] = {}
-    for m in selected_metrics:
-        suffix = _METRIC_META[m]["suffix"]
-        metric_groups[m] = [c for c in results_df.columns if c.endswith(suffix)]
-    metric_cols = [c for m in selected_metrics for c in metric_groups[m]]
-
-    results_df = results_df[info_cols + metric_cols]
-
-    # --- Rename columns for display ---
-    rename_map: dict[str, str] = {
-        "ride": "Ride",
-        "distance_method": "Distance",
-        "speed_smoothed": "Smoothed",
-        "route_type": "Type",
-        "contains_pauses": "Pauses",
-    }
-    for m in selected_metrics:
-        meta = _METRIC_META[m]
-        for c in metric_groups[m]:
-            est_key = c[: -len(meta["suffix"])]
-            rename_map[c] = f"{col_to_name[est_key]} {meta['label']}"
-    display_df = results_df.rename(columns=rename_map)
-
-    # --- Global averages (sorted by MAE if available) ---
-    global_data: dict[str, pd.Series] = {}
-    for m in selected_metrics:
-        meta = _METRIC_META[m]
-        cols = metric_groups[m]
-        global_data[meta["label"]] = (
-            results_df[cols]
-            .mean()
-            .rename(lambda c, s=meta["suffix"]: col_to_name[c[: -len(s)]])
-        )
-    global_avg = pd.DataFrame(global_data)
-    sort_col = "MAE" if "mae" in selected_metrics else global_avg.columns[0]
-    global_avg = global_avg.sort_values(sort_col)
-
-    # --- Aggregations ---
-    agg_rename = {c: rename_map[c] for c in metric_cols}
-    by_type_df = (
-        results_df.groupby("route_type")[metric_cols].mean().rename(columns=agg_rename)
-    )
-    by_pipeline_df = (
-        results_df.groupby(["distance_method", "speed_smoothed"])[metric_cols]
-        .mean()
-        .rename(columns=agg_rename)
-    )
-
-    # --- Highlighting helpers ---
-    _BOLD = "font-weight: bold"
-
-    def _highlight_min(s: pd.Series) -> list[str]:
-        return [_BOLD if v == s.min() else "" for v in s]
-
-    def _highlight_min_abs(s: pd.Series) -> list[str]:
-        return [_BOLD if abs(v) == s.abs().min() else "" for v in s]
-
-    # --- Format maps ---
-    display_groups: dict[str, list[str]] = {
-        m: [rename_map[c] for c in metric_groups[m]] for m in selected_metrics
-    }
-    fmt_map = {
-        c: _METRIC_META[m]["fmt"] for m in selected_metrics for c in display_groups[m]
-    }
-    global_fmt = {
-        _METRIC_META[m]["label"]: _METRIC_META[m]["fmt"] for m in selected_metrics
-    }
-
-    # --- Styled HTML tables ---
-    _STYLES = [
-        {
-            "selector": "",
-            "props": "border-collapse:collapse; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:12.5px;",
-        },
-        {"selector": "th,td", "props": "padding:5px 12px; text-align:right;"},
-        {"selector": "thead", "props": "border-bottom:1px solid #888;"},
-        {"selector": "tbody tr:nth-child(even)", "props": "background:#f0f4f8;"},
-        {
-            "selector": "caption",
-            "props": "caption-side:top; font-weight:bold; text-align:left; padding-bottom:6px;",
-        },
-    ]
-
-    per_ride_styler = display_df.style
-    for m in selected_metrics:
-        cols = pd.Index(display_groups[m])
-        fn = _highlight_min_abs if m == "mpe" else _highlight_min
-        per_ride_styler = per_ride_styler.apply(fn, axis=1, subset=cols)
-    per_ride_html = (
-        per_ride_styler.format(fmt_map)
-        .set_table_styles(_STYLES)
-        .set_caption("Per-ride metrics")
-        .hide(axis="index")
-        .to_html()
-    )
-
-    global_styler = global_avg.style
-    for m in selected_metrics:
-        label = _METRIC_META[m]["label"]
-        fn = _highlight_min_abs if m == "mpe" else _highlight_min
-        global_styler = global_styler.apply(fn, axis=0, subset=[label])
-    global_html = (
-        global_styler.format(global_fmt)
-        .set_table_styles(_STYLES)
-        .set_caption("Global averages")
-        .to_html()
-    )
-
-    by_type_html = (
-        by_type_df.style.format(fmt_map)
-        .set_table_styles(_STYLES)
-        .set_caption("Averages by route type")
-        .to_html()
-    )
-    by_pipeline_html = (
-        by_pipeline_df.style.format(fmt_map)
-        .set_table_styles(_STYLES)
-        .set_caption("Averages by pipeline")
-        .to_html()
-    )
-
-    out_dir = Path("output")
-    out_dir.mkdir(exist_ok=True)
-    html_path = out_dir / "results.html"
-    html_path.write_text(
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<style>body{font-family:-apple-system,sans-serif;margin:2em;color:#222;}"
-        "h2{margin-top:2em;font-size:1.05em;color:#555;border-bottom:1px solid #ddd;padding-bottom:4px;}"
-        "</style></head><body>"
-        f"<h2>Per-ride metrics</h2>{per_ride_html}"
-        f"<h2>Global averages</h2>{global_html}"
-        f"<h2>Averages by route type</h2>{by_type_html}"
-        f"<h2>Averages by pipeline</h2>{by_pipeline_html}"
-        "</body></html>"
-    )
-    print(f"Saved {html_path}")
+    write_html_report(results_df, args.metrics, Path("output") / "results.html")
