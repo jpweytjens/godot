@@ -86,31 +86,52 @@ def speed_actual(ride_df: pd.DataFrame) -> alt.Chart:
     )
 
 
-def speed_estimated(result_df: pd.DataFrame) -> alt.Chart:
+def speed_estimated(
+    result_df: pd.DataFrame,
+    color: str = TOL_VIBRANT[5],
+    opacity: float = 1.0,
+    stroke_width: float = 1.5,
+) -> alt.Chart:
     """Estimated average speed line from the estimator."""
     df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
     return (
         alt.Chart(df)
         .mark_line(
-            strokeWidth=1.5, color=TOL_VIBRANT[5], invalid="break-paths-filter-domains"
+            strokeWidth=stroke_width,
+            color=color,
+            opacity=opacity,
+            invalid="break-paths-filter-domains",
         )
         .encode(x=X_ELAPSED, y=alt.Y("speed_kmh:Q").title("Speed (km/h)"))
     )
 
 
-def eta_error(result_df: pd.DataFrame) -> alt.Chart:
+def eta_error(
+    result_df: pd.DataFrame,
+    color: str = TOL_VIBRANT[5],
+    opacity: float = 1.0,
+    stroke_width: float = 1.2,
+) -> alt.Chart:
     """ETA error (delta) line in minutes."""
     df = result_df.assign(delta_min=result_df["delta_s"] / 60)
     return (
         alt.Chart(df)
         .mark_line(
-            strokeWidth=1.2, color=TOL_VIBRANT[5], invalid="break-paths-filter-domains"
+            strokeWidth=stroke_width,
+            color=color,
+            opacity=opacity,
+            invalid="break-paths-filter-domains",
         )
         .encode(x=X_ELAPSED, y=alt.Y("delta_min:Q").title("ETA \u2212 ATA (min)"))
     )
 
 
-def eta_error_pct(result_df: pd.DataFrame) -> alt.Chart:
+def eta_error_pct(
+    result_df: pd.DataFrame,
+    color: str = TOL_VIBRANT[5],
+    opacity: float = 1.0,
+    stroke_width: float = 1.2,
+) -> alt.Chart:
     """ETA error as percentage of actual remaining time."""
     ata = result_df["ata_remaining_s"]
     pct = (result_df["delta_s"] / ata).where(ata > 0) * 100
@@ -118,7 +139,10 @@ def eta_error_pct(result_df: pd.DataFrame) -> alt.Chart:
     return (
         alt.Chart(df)
         .mark_line(
-            strokeWidth=1.2, color=TOL_VIBRANT[5], invalid="break-paths-filter-domains"
+            strokeWidth=stroke_width,
+            color=color,
+            opacity=opacity,
+            invalid="break-paths-filter-domains",
         )
         .encode(x=X_ELAPSED, y=alt.Y("delta_pct:Q").title("ETA error (%)"))
     )
