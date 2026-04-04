@@ -110,6 +110,35 @@ def eta_error(result_df: pd.DataFrame) -> alt.Chart:
     )
 
 
+def eta_error_pct(result_df: pd.DataFrame) -> alt.Chart:
+    """ETA error as percentage of actual remaining time."""
+    ata = result_df["ata_remaining_s"]
+    pct = (result_df["delta_s"] / ata).where(ata > 0) * 100
+    df = result_df.assign(delta_pct=pct)
+    return (
+        alt.Chart(df)
+        .mark_line(
+            strokeWidth=1.2, color=TOL_VIBRANT[5], invalid="break-paths-filter-domains"
+        )
+        .encode(x=X_ELAPSED, y=alt.Y("delta_pct:Q").title("ETA error (%)"))
+    )
+
+
+def error_pct_refs() -> alt.Chart:
+    """Horizontal reference lines at 0%, +10%, -10%."""
+    zero = (
+        alt.Chart(pd.DataFrame({"y": [0]}))
+        .mark_rule(color="black", strokeWidth=0.5)
+        .encode(y="y:Q")
+    )
+    bounds = (
+        alt.Chart(pd.DataFrame({"y": [10, -10]}))
+        .mark_rule(color="#BBBBBB", strokeWidth=1, strokeDash=[4, 4])
+        .encode(y="y:Q")
+    )
+    return zero + bounds
+
+
 def error_refs() -> alt.Chart:
     """Horizontal reference lines at 0, +5, -5 minutes."""
     zero = (
@@ -152,7 +181,7 @@ def eta_countdown(result_df: pd.DataFrame) -> alt.Chart:
 
 
 def speed_comparison(ride_df: pd.DataFrame, result_df: pd.DataFrame) -> alt.Chart:
-    """Actual vs estimated speed with legend."""
+    """Actual vs estimated speed with legend and total avg speed reference line."""
     est_df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
     elapsed_s = (ride_df["time"] - ride_df["time"].iloc[0]).dt.total_seconds()
     naive_kmh = (ride_df["distance_m"] / elapsed_s) * 3.6
@@ -165,7 +194,7 @@ def speed_comparison(ride_df: pd.DataFrame, result_df: pd.DataFrame) -> alt.Char
         ignore_index=True,
     )
     series = ["Actual", "Estimated", "Naive avg"]
-    return (
+    lines = (
         alt.Chart(combined)
         .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
         .encode(
@@ -184,6 +213,14 @@ def speed_comparison(ride_df: pd.DataFrame, result_df: pd.DataFrame) -> alt.Char
             .legend(None),
         )
     )
+    # Horizontal line at the ride's final total average speed
+    total_avg_kmh = float(naive_kmh.iloc[-1])
+    ref = (
+        alt.Chart(pd.DataFrame({"y": [total_avg_kmh]}))
+        .mark_rule(color=TOL_BRIGHT[1], strokeWidth=1.2, strokeDash=[6, 3])
+        .encode(y="y:Q")
+    )
+    return lines + ref
 
 
 def comparison_errors(
