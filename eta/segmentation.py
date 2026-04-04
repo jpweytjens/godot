@@ -243,6 +243,35 @@ def build_segments(points: list[tuple[float, float]]) -> list[RouteSegment]:
     return segments
 
 
+def decimate_to_gradient_segments(
+    df: pd.DataFrame,
+    min_area: float = 2.0,
+    min_length_m: float = 200.0,
+) -> tuple[list[tuple[float, float]], list[RouteSegment]]:
+    """Decimate an elevation profile into gradient segments via VW simplification.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Ride DataFrame with `distance_m` and `elevation_m` columns.
+    min_area : float
+        Visvalingam-Whyatt minimum triangle area.
+    min_length_m : float
+        Minimum segment length in meters after merging.
+
+    Returns
+    -------
+    points : list of (float, float)
+        Simplified (distance_m, elevation_m) polyline.
+    segments : list of RouteSegment
+        One segment per consecutive pair of points.
+    """
+    points = list(zip(df["distance_m"], df["elevation_m"]))
+    points = visvalingam_whyatt(points, min_area)
+    points = merge_short_segments(points, min_length_m)
+    return points, build_segments(points)
+
+
 def gradient_at_distance(distance_m: float, segments: list[RouteSegment]) -> float:
     """Return the gradient at a given distance along the route.
 
