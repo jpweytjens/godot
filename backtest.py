@@ -8,6 +8,7 @@ from tqdm.contrib.concurrent import process_map
 
 from eta.benchmark import backtest, compute_metrics
 from eta.estimators import (
+    AdaptiveLerpSpeedEstimator,
     AvgSpeedEstimator,
     DEWMASpeedEstimator,
     EWMASpeedEstimator,
@@ -67,7 +68,7 @@ _TABLE_STYLES = [
 ]
 
 ESTIMATORS = {
-    "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
+    # "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
     "Average speed (total)": (AvgSpeedEstimator(moving_only=False), NoPause()),
     # "Rolling 5 min (moving)": (
     #     RollingAvgSpeedEstimator(window_s=300, moving_only=True),
@@ -81,22 +82,22 @@ ESTIMATORS = {
     #     RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
     #     SubtractElapsed(),
     # ),
-    "Rolling 60 min (moving)": (
-        RollingAvgSpeedEstimator(window_s=3600, moving_only=True),
-        SubtractElapsed(),
-    ),
-    "Rolling median 30 min (moving)": (
-        RollingMedianSpeedEstimator(window_s=1800, moving_only=True),
-        SubtractElapsed(),
-    ),
-    "EWMA 60 min (moving)": (
-        EWMASpeedEstimator(span_s=3600, moving_only=True),
-        SubtractElapsed(),
-    ),
-    "EWMA 10 min (moving)": (
-        EWMASpeedEstimator(span_s=600, moving_only=True),
-        SubtractElapsed(),
-    ),
+    # "Rolling 60 min (moving)": (
+    #     RollingAvgSpeedEstimator(window_s=3600, moving_only=True),
+    #     SubtractElapsed(),
+    # ),
+    # "Rolling median 30 min (moving)": (
+    #     RollingMedianSpeedEstimator(window_s=1800, moving_only=True),
+    #     SubtractElapsed(),
+    # ),
+    # "EWMA 60 min (moving)": (
+    #     EWMASpeedEstimator(span_s=3600, moving_only=True),
+    #     SubtractElapsed(),
+    # ),
+    # "EWMA 10 min (moving)": (
+    #     EWMASpeedEstimator(span_s=600, moving_only=True),
+    #     SubtractElapsed(),
+    # ),
     "DEWMA 10+60 min (moving)": (
         DEWMASpeedEstimator(
             slow_span_s=3600,
@@ -107,14 +108,14 @@ ESTIMATORS = {
         ),
         SubtractElapsed(),
     ),
-    "EWMA 10 min + prior (moving)": (
-        PriorEWMASpeedEstimator(
-            span_s=600,
-            prior_ms=28.8 / 3.6,
-            moving_only=True,
-        ),
-        SubtractElapsed(),
-    ),
+    # "EWMA 10 min + prior (moving)": (
+    #     PriorEWMASpeedEstimator(
+    #         span_s=600,
+    #         prior_ms=28.8 / 3.6,
+    #         moving_only=True,
+    #     ),
+    #     SubtractElapsed(),
+    # ),
     "Lerp (moving)": (
         LerpSpeedEstimator(
             prior_ms=28.8 / 3.6,
@@ -124,6 +125,16 @@ ESTIMATORS = {
             moving_only=True,
         ),
         SubtractElapsed(),
+    ),
+    "Adaptive lerp": (
+        AdaptiveLerpSpeedEstimator(
+            prior_ms=28.8 / 3.6,
+            tau=300,
+            k=2.0,
+            fast_span_s=3600,
+            fast_weight=0.15,
+        ),
+        NoPause(),
     ),
 }
 

@@ -413,6 +413,107 @@ def lerp(start, end, weight):
     return start * (1 - weight) + end * weight
 
 
+class AdaptiveLerpSpeedEstimator(BaseEstimator):
+    """Pause-aware blended speed estimator.
+
+    Combines three signals:
+
+    - **slow**: cumulative average speed (total time, so pauses have cost),
+      with exponential decay toward a floor during pauses to prevent
+      ETA skyrocketing.
+    - **fast**: 60-minute EWMA of instantaneous speed (moving-only),
+      seeded with a prior for immediate estimates.
+    - **final**: ``lerp(slow, fast, fast_weight)``
+
+    During a pause, ``confidence = ewma(is_moving, span=tau)`` decays
+    exponentially, blending the slow component from ``avg_total`` toward
+    a floor derived from the ride data:
+
+        floor = cumsum(dd) / (cumsum(dt_elapsed) + k * tau)
+
+    ``tau`` encodes typical pause length; ``k`` (default 2) accounts for
+    longer-than-typical pauses.  The prior only seeds the fast EWMA at
+    ride start.
+
+    Parameters
+    ----------
+    prior_ms : float
+        Prior speed in m/s for seeding the fast EWMA.
+    tau : float
+        Confidence decay span in seconds. Controls how quickly the slow
+        component falls back to the floor during a pause.
+    k : float
+        Floor multiplier on tau. ``floor = distance / (elapsed + k*tau)``.
+    fast_span_s : float
+        EWMA span for the fast component.
+    fast_weight : float
+        Weight of the fast component in the final blend.
+    """
+
+    def __init__(
+        self,
+        prior_ms: float = 5.0,
+        tau: float = 300.0,
+        k: float = 2.0,
+        fast_span_s: float = 3600.0,
+        fast_weight: float = 0.15,
+    ) -> None:
+        self._prior_ms = prior_ms
+        self._tau = tau
+        self._k = k
+        self._fast_span_s = fast_span_s
+        self._fast_weight = fast_weight
+
+    def __str__(self) -> str:
+        prior_kmh = self._prior_ms * 3.6
+        return (
+            f"adaptive lerp (τ={int(self._tau)}s, k={self._k}, "
+            f"fast={int(self._fast_span_s)}s, w={self._fast_weight}, "
+            f"prior={prior_kmh:.1f}km/h)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"AdaptiveLerpSpeedEstimator(prior_ms={self._prior_ms!r}, "
+            f"tau={self._tau!r}, k={self._k!r}, "
+            f"fast_span_s={self._fast_span_s!r}, "
+            f"fast_weight={self._fast_weight!r})"
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        df = ride.df
+        dd = df["delta_distance"]
+        dt = df["delta_time"]
+        is_moving = (~df["paused"]).astype(float)
+
+        # Cumulative totals (elapsed time, including pauses)
+        cum_dd = dd.cumsum()
+        cum_dt = dt.cumsum()
+
+        # Slow component: avg_total (includes pause cost)
+        avg_total = self.safe_divide(cum_dd, cum_dt)
+
+        # Confidence: exponential decay during pauses
+        confidence = is_moving.ewm(span=self._tau, min_periods=1).mean()
+
+        # Floor: avg if you added k*tau extra pause seconds
+        floor = self.safe_divide(cum_dd, cum_dt + self._k * self._tau)
+
+        # Blend: avg_total when riding, decays toward floor during pause
+        slow = lerp(floor, avg_total, confidence)
+
+        # Fast component: 60-min EWMA, moving-only, seeded with prior
+        inst_speed = self.safe_divide(dd, dt)
+        inst_speed = inst_speed.where(~df["paused"])
+        fast = (
+            _seed_prior(inst_speed, self._prior_ms)
+            .ewm(span=self._fast_span_s, min_periods=1)
+            .mean()
+        )
+
+        return lerp(slow, fast, self._fast_weight)
+
+
 class PriorEWMASpeedEstimator(BaseEstimator):
     """EWMA speed estimator seeded with a prior.
 
