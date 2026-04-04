@@ -317,3 +317,227 @@ class DEWMASpeedEstimator(BaseEstimator):
         slow = self._slow.predict(ride)
         fast = self._fast.predict(ride)
         return self._slow_weight * slow + self._fast_weight * fast
+
+
+class LerpSpeedEstimator(BaseEstimator):
+    """Blended prior-ramp + EWMA speed estimator.
+
+    Builds a slow component that ramps linearly from a global prior toward
+    the cumulative average speed over `ramp_s` moving seconds, then blends
+    it with a fast EWMA for responsiveness.
+
+    Parameterse
+    ----------
+    prior_ms : float
+        Prior speed in m/s (e.g. from `compute_global_prior`).
+    fast_span_s : float
+        EWMA span for the fast component in seconds. Default 600 (10 min).
+    ramp_s : float
+        Moving seconds over which the slow component transitions from
+        prior to cumulative average. Default 600.
+    fast_weight : float
+        Weight of the fast EWMA in the final blend. Default 0.15
+        (i.e. 85 % slow, 15 % fast).
+    moving_only : bool
+        If True (default), ignore paused rows in all computations.
+    """
+
+    def __init__(
+        self,
+        prior_ms: float = 5.0,
+        fast_span_s: float = 600.0,
+        ramp_s: float = 600.0,
+        fast_weight: float = 0.15,
+        moving_only: bool = True,
+    ) -> None:
+        self._prior_ms = prior_ms
+        self._fast_span_s = fast_span_s
+        self._ramp_s = ramp_s
+        self._fast_weight = fast_weight
+        self._moving_only = moving_only
+
+    def __str__(self) -> str:
+        mode = "moving" if self._moving_only else "elapsed"
+        prior_kmh = self._prior_ms * 3.6
+        return (
+            f"lerp speed (ramp={int(self._ramp_s)}s, fast={int(self._fast_span_s)}s, "
+            f"w={self._fast_weight}, prior={prior_kmh:.1f}km/h, {mode})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"LerpSpeedEstimator(prior_ms={self._prior_ms!r}, "
+            f"fast_span_s={self._fast_span_s!r}, ramp_s={self._ramp_s!r}, "
+            f"fast_weight={self._fast_weight!r}, moving_only={self._moving_only!r})"
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        df = ride.df
+        dd = df["delta_distance"]
+        dt = df["delta_time"]
+
+        # Pause masking
+        if self._moving_only:
+            moving = (~df["paused"]).astype(float)
+            dd_m, dt_m = dd * moving, dt * moving
+        else:
+            moving = pd.Series(1.0, index=df.index)
+            dd_m, dt_m = dd, dt
+
+        # Slow component: prior → cumulative average over ramp_s seconds
+        cum_avg = self.safe_divide(dd_m.cumsum(), dt_m.cumsum()).fillna(self._prior_ms)
+        ramp = (moving.cumsum() / self._ramp_s).clip(0.0, 1.0)
+        slow = lerp(self._prior_ms, cum_avg, ramp)
+
+        # Fast component: prior-seeded EWMA
+        inst_speed = self.safe_divide(dd, dt)
+        if self._moving_only:
+            inst_speed = inst_speed.where(~df["paused"])
+        fast = (
+            _seed_prior(inst_speed, self._prior_ms)
+            .ewm(span=self._fast_span_s, min_periods=1)
+            .mean()
+        )
+
+        return lerp(slow, fast, self._fast_weight)
+
+
+def _seed_prior(speed: pd.Series, prior_ms: float) -> pd.Series:
+    """Replace leading NaNs with the prior so EWMA starts immediately."""
+    leading_nan = speed.isna().cumprod().astype(bool)
+    return speed.where(~leading_nan, prior_ms)
+
+
+def lerp(start, end, weight):
+    """Blend from `start` toward `end` as `weight` goes from 0 to 1."""
+    return start * (1 - weight) + end * weight
+
+
+class PriorEWMASpeedEstimator(BaseEstimator):
+    """EWMA speed estimator seeded with a prior.
+
+    Uses the prior speed for initial observations so the EWMA produces
+    estimates from the first row. The prior is gradually diluted as
+    real data accumulates.
+
+    Parameters
+    ----------
+    span_s : float, optional
+        EWMA span in seconds. Defaults to EWMA_SPAN_S (3600 s).
+    alpha : float, optional
+        Smoothing factor override.
+    prior_ms : float
+        Prior speed in m/s (e.g. from `compute_global_prior`).
+    moving_only : bool, optional
+        If True (default), NaN out speed during pauses before smoothing.
+    """
+
+    def __init__(
+        self,
+        span_s: float | None = None,
+        alpha: float | None = None,
+        prior_ms: float = 5.0,
+        moving_only: bool = True,
+    ) -> None:
+        self._span_s = EWMA_SPAN_S if span_s is None else span_s
+        self._alpha = alpha
+        self._prior_ms = prior_ms
+        self._moving_only = moving_only
+
+    def __str__(self) -> str:
+        mode = "moving" if self._moving_only else "elapsed"
+        prior_kmh = self._prior_ms * 3.6
+        if self._alpha is not None:
+            return (
+                f"EWMA+prior speed (α={self._alpha}, prior={prior_kmh:.1f}km/h, {mode})"
+            )
+        return f"EWMA+prior speed ({int(self._span_s)}s, prior={prior_kmh:.1f}km/h, {mode})"
+
+    def __repr__(self) -> str:
+        return (
+            f"PriorEWMASpeedEstimator(span_s={self._span_s!r}, "
+            f"alpha={self._alpha!r}, prior_ms={self._prior_ms!r}, "
+            f"moving_only={self._moving_only!r})"
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        df = ride.df
+        speed = self.safe_divide(df["delta_distance"], df["delta_time"])
+        if self._moving_only:
+            speed = speed.where(~df["paused"])
+        speed = _seed_prior(speed, self._prior_ms)
+        ewm_kwargs: dict = {"min_periods": 1}
+        if self._alpha is not None:
+            ewm_kwargs["alpha"] = self._alpha
+        else:
+            ewm_kwargs["span"] = self._span_s
+        return speed.ewm(**ewm_kwargs).mean()
+
+
+class PriorDEWMASpeedEstimator(BaseEstimator):
+    """Double EWMA speed estimator seeded with a prior.
+
+    Weighted blend of slow and fast `PriorEWMASpeedEstimator` components.
+
+    Parameters
+    ----------
+    slow_span_s : float, optional
+        Span for the slow EWMA. Default 3600 (60 min).
+    fast_span_s : float, optional
+        Span for the fast EWMA. Default 600 (10 min).
+    slow_alpha : float, optional
+        Alpha override for the slow EWMA.
+    fast_alpha : float, optional
+        Alpha override for the fast EWMA.
+    slow_weight : float, optional
+        Weight for the slow component. Default 0.7.
+    fast_weight : float, optional
+        Weight for the fast component. Default 0.3.
+    prior_ms : float
+        Prior speed in m/s.
+    moving_only : bool, optional
+        If True (default), NaN out speed during pauses.
+    """
+
+    def __init__(
+        self,
+        slow_span_s: float = 3600.0,
+        fast_span_s: float = 600.0,
+        slow_alpha: float | None = None,
+        fast_alpha: float | None = None,
+        slow_weight: float = 0.7,
+        fast_weight: float = 0.3,
+        prior_ms: float = 5.0,
+        moving_only: bool = True,
+    ) -> None:
+        self._slow = PriorEWMASpeedEstimator(
+            span_s=slow_span_s,
+            alpha=slow_alpha,
+            prior_ms=prior_ms,
+            moving_only=moving_only,
+        )
+        self._fast = PriorEWMASpeedEstimator(
+            span_s=fast_span_s,
+            alpha=fast_alpha,
+            prior_ms=prior_ms,
+            moving_only=moving_only,
+        )
+        self._slow_weight = slow_weight
+        self._fast_weight = fast_weight
+
+    def __str__(self) -> str:
+        return (
+            f"DEWMA+prior speed ({self._fast} × {self._fast_weight} "
+            f"+ {self._slow} × {self._slow_weight})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PriorDEWMASpeedEstimator(slow={self._slow!r}, fast={self._fast!r}, "
+            f"slow_weight={self._slow_weight!r}, fast_weight={self._fast_weight!r})"
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        slow = self._slow.predict(ride)
+        fast = self._fast.predict(ride)
+        return self._slow_weight * slow + self._fast_weight * fast

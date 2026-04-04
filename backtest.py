@@ -11,6 +11,8 @@ from eta.estimators import (
     AvgSpeedEstimator,
     DEWMASpeedEstimator,
     EWMASpeedEstimator,
+    LerpSpeedEstimator,
+    PriorEWMASpeedEstimator,
     RollingAvgSpeedEstimator,
     RollingMedianSpeedEstimator,
 )
@@ -67,18 +69,18 @@ _TABLE_STYLES = [
 ESTIMATORS = {
     "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
     "Average speed (total)": (AvgSpeedEstimator(moving_only=False), NoPause()),
-    "Rolling 5 min (moving)": (
-        RollingAvgSpeedEstimator(window_s=300, moving_only=True),
-        SubtractElapsed(),
-    ),
-    "Rolling 10 min (moving)": (
-        RollingAvgSpeedEstimator(window_s=600, moving_only=True),
-        SubtractElapsed(),
-    ),
-    "Rolling 30 min (moving)": (
-        RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
-        SubtractElapsed(),
-    ),
+    # "Rolling 5 min (moving)": (
+    #     RollingAvgSpeedEstimator(window_s=300, moving_only=True),
+    #     SubtractElapsed(),
+    # ),
+    # "Rolling 10 min (moving)": (
+    #     RollingAvgSpeedEstimator(window_s=600, moving_only=True),
+    #     SubtractElapsed(),
+    # ),
+    # "Rolling 30 min (moving)": (
+    #     RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
+    #     SubtractElapsed(),
+    # ),
     "Rolling 60 min (moving)": (
         RollingAvgSpeedEstimator(window_s=3600, moving_only=True),
         SubtractElapsed(),
@@ -101,6 +103,24 @@ ESTIMATORS = {
             fast_span_s=600,
             slow_weight=0.7,
             fast_weight=0.3,
+            moving_only=True,
+        ),
+        SubtractElapsed(),
+    ),
+    "EWMA 10 min + prior (moving)": (
+        PriorEWMASpeedEstimator(
+            span_s=600,
+            prior_ms=28.8 / 3.6,
+            moving_only=True,
+        ),
+        SubtractElapsed(),
+    ),
+    "Lerp (moving)": (
+        LerpSpeedEstimator(
+            prior_ms=28.8 / 3.6,
+            fast_span_s=600,
+            ramp_s=600,
+            fast_weight=0.15,
             moving_only=True,
         ),
         SubtractElapsed(),
