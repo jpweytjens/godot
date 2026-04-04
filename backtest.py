@@ -30,45 +30,6 @@ from eta.plot import (
 )
 from eta.ride import load_ride
 
-_N_INFO_COLS = 5  # ride, distance_method, speed_smoothed, route_type, contains_pauses
-
-_TABLE_STYLES = [
-    # Booktabs-style outer rules + clean font
-    {
-        "selector": "",
-        "props": (
-            "border-collapse: collapse;"
-            "border-top: 2px solid #222;"
-            "border-bottom: 2px solid #222;"
-            "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;"
-            "font-size: 12.5px;"
-        ),
-    },
-    # Mid-rule below header
-    {"selector": "thead", "props": "border-bottom: 1px solid #888;"},
-    # No cell borders, comfortable padding
-    {"selector": "th, td", "props": "padding: 5px 12px; border: none;"},
-    # Numbers right-aligned, headers right-aligned
-    {"selector": "td", "props": "text-align: right;"},
-    {
-        "selector": "th",
-        "props": "text-align: right; font-weight: 600; background-color: #fff;",
-    },
-    # Info columns left-aligned
-    {
-        "selector": f"td:nth-child(-n+{_N_INFO_COLS}), th:nth-child(-n+{_N_INFO_COLS})",
-        "props": "text-align: left;",
-    },
-    # Alternating row shading
-    {"selector": "tbody tr:nth-child(even)", "props": "background-color: #f0f4f8;"},
-    {"selector": "tbody tr:hover", "props": "background-color: #dce8f5;"},
-    # Caption
-    {
-        "selector": "caption",
-        "props": "caption-side: top; font-size: 14px; font-weight: bold; padding-bottom: 8px; text-align: left;",
-    },
-]
-
 ESTIMATORS = {
     # "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
     "Average speed (total)": (AvgSpeedEstimator(moving_only=False), NoPause()),
@@ -327,47 +288,6 @@ if __name__ == "__main__":
     print("\n--- Per-ride metrics ---")
     print(results_df.to_string(index=False, float_format="{:.2f}".format))
 
-    out_dir = Path("output")
-    out_dir.mkdir(exist_ok=True)
-
-    # --- Rename columns for display ---
-    rename_map: dict[str, str] = {
-        "ride": "Ride",
-        "distance_method": "Distance",
-        "speed_smoothed": "Smoothed",
-        "route_type": "Type",
-        "contains_pauses": "Pauses",
-    }
-    for m in selected_metrics:
-        meta = _METRIC_META[m]
-        for c in metric_groups[m]:
-            est_key = c[: -len(meta["suffix"])]
-            rename_map[c] = f"{col_to_name[est_key]} {meta['label']}"
-
-    display_df = results_df.rename(columns=rename_map)
-    display_groups: dict[str, list[str]] = {
-        m: [rename_map[c] for c in metric_groups[m]] for m in selected_metrics
-    }
-    display_metric = [c for m in selected_metrics for c in display_groups[m]]
-
-    # Format map: minutes get 2 decimals, percentages get 1
-    fmt_map = {
-        c: _METRIC_META[m]["fmt"] for m in selected_metrics for c in display_groups[m]
-    }
-
-    # Separator styles between metric groups
-    sep_styles: list[dict] = []
-    pos = _N_INFO_COLS + 1  # nth-child is 1-indexed
-    for i, m in enumerate(selected_metrics):
-        if i > 0:
-            sep_styles.append(
-                {
-                    "selector": f"td:nth-child({pos}), th:nth-child({pos})",
-                    "props": "border-left: 1px solid #ccc;",
-                }
-            )
-        pos += len(display_groups[m])
-
     # --- Global averages (sorted by MAE if available) ---
     global_data: dict[str, pd.Series] = {}
     for m in selected_metrics:
@@ -383,15 +303,10 @@ if __name__ == "__main__":
     global_avg = global_avg.sort_values(sort_col)
 
     # --- By-route-type and by-pipeline aggregations ---
-    agg_rename = {c: rename_map[c] for c in metric_cols}
-    by_type_df = (
-        results_df.groupby("route_type")[metric_cols].mean().rename(columns=agg_rename)
-    )
-    by_pipeline_df = (
-        results_df.groupby(["distance_method", "speed_smoothed"])[metric_cols]
-        .mean()
-        .rename(columns=agg_rename)
-    )
+    by_type_df = results_df.groupby("route_type")[metric_cols].mean()
+    by_pipeline_df = results_df.groupby(["distance_method", "speed_smoothed"])[
+        metric_cols
+    ].mean()
 
     print("\n--- Global averages ---")
     print(global_avg.to_string(float_format="{:.2f}".format))
@@ -401,80 +316,3 @@ if __name__ == "__main__":
 
     print("\n--- Averages by pipeline ---")
     print(by_pipeline_df.to_string(float_format="{:.2f}".format))
-
-    # --- Highlighting helpers ---
-    _BOLD = "font-weight: bold"
-
-    def _highlight_min_all(s: pd.Series) -> list[str]:
-        """Bold all values that equal the row/column minimum."""
-        return [_BOLD if v == s.min() else "" for v in s]
-
-    def _highlight_min_abs_all(s: pd.Series) -> list[str]:
-        """Bold all values closest to zero (for signed metrics like MPE)."""
-        return [_BOLD if abs(v) == s.abs().min() else "" for v in s]
-
-    # --- HTML: per-ride table ---
-    styler = display_df.style
-    for m in selected_metrics:
-        cols = pd.Index(display_groups[m])
-        if m == "mpe":
-            styler = styler.apply(_highlight_min_abs_all, axis=1, subset=cols)
-        else:
-            styler = styler.apply(_highlight_min_all, axis=1, subset=cols)
-    per_ride_html = (
-        styler.format(fmt_map)
-        .set_table_styles(_TABLE_STYLES + sep_styles)
-        .set_caption("Per-ride metrics")
-        .hide(axis="index")
-        .to_html()
-    )
-
-    # --- HTML: global averages (highlight best per column) ---
-    global_fmt = {
-        _METRIC_META[m]["label"]: _METRIC_META[m]["fmt"] for m in selected_metrics
-    }
-    global_styler = global_avg.style
-    for m in selected_metrics:
-        label = _METRIC_META[m]["label"]
-        if m == "mpe":
-            global_styler = global_styler.apply(
-                _highlight_min_abs_all, axis=0, subset=[label]
-            )
-        else:
-            global_styler = global_styler.apply(
-                _highlight_min_all, axis=0, subset=[label]
-            )
-    global_html = (
-        global_styler.format(global_fmt)
-        .set_table_styles(_TABLE_STYLES)
-        .set_caption("Global averages")
-        .to_html()
-    )
-
-    by_type_html = (
-        by_type_df.style.format(fmt_map)
-        .set_table_styles(_TABLE_STYLES + sep_styles)
-        .set_caption("Averages by route type")
-        .to_html()
-    )
-    by_pipeline_html = (
-        by_pipeline_df.style.format(fmt_map)
-        .set_table_styles(_TABLE_STYLES + sep_styles)
-        .set_caption("Averages by pipeline (distance method × speed smoothing)")
-        .to_html()
-    )
-
-    html_path = out_dir / "results.html"
-    html_path.write_text(
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<style>"
-        "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:2em;color:#222;}"
-        "h2{margin-top:2.5em;font-size:1.05em;color:#555;border-bottom:1px solid #ddd;padding-bottom:4px;}"
-        "</style></head><body>"
-        f"<h2>Per-ride metrics</h2>{per_ride_html}"
-        f"<h2>Global averages</h2>{global_html}"
-        f"<h2>Averages by route type</h2>{by_type_html}"
-        f"<h2>Averages by pipeline</h2>{by_pipeline_html}"
-        "</body></html>"
-    )
-    print(f"Saved {html_path}")
