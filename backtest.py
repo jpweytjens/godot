@@ -27,8 +27,14 @@ from eta.plot import (
     pause_bands,
     prep_time_axis,
     speed_comparison,
+    speed_estimated,
 )
 from eta.ride import load_ride
+from eta.theme import TOL_BRIGHT
+
+REFERENCE_ESTIMATOR = "Average speed (total)"
+REF_COLOR = TOL_BRIGHT[3]  # yellow
+REF_OPACITY = 0.7
 
 ESTIMATORS = {
     # "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
@@ -128,8 +134,35 @@ def run(
         and per-estimator MAE/RMSE columns.
     """
     ride = load_ride(gpx_path, distance_method, smooth_speed, smooth_window)
+
+    # Oracle prior: actual moving average speed for this ride
+    df = ride.df
+    moving = ~df["paused"]
+    oracle_ms = float(
+        df.loc[moving, "delta_distance"].sum() / df.loc[moving, "delta_time"].sum()
+    )
+    # Noisy prior: sample from N(oracle, 10% CV) to simulate a good gradient estimate
+    rng = __import__("numpy").random.default_rng(42)
+    noisy_ms = float(rng.normal(oracle_ms, oracle_ms * 0.10))
+
+    oracle_estimators: dict[str, tuple] = {
+        "Adaptive lerp (oracle prior)": (
+            AdaptiveLerpSpeedEstimator(
+                prior_ms=oracle_ms, tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15
+            ),
+            NoPause(),
+        ),
+        "Adaptive lerp (noisy prior)": (
+            AdaptiveLerpSpeedEstimator(
+                prior_ms=noisy_ms, tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15
+            ),
+            NoPause(),
+        ),
+    }
+
     results = {
-        name: backtest(ride, est, pause) for name, (est, pause) in ESTIMATORS.items()
+        name: backtest(ride, est, pause)
+        for name, (est, pause) in {**ESTIMATORS, **oracle_estimators}.items()
     }
 
     out_dir = Path("output") / "backtests" / ride.name
@@ -138,24 +171,49 @@ def run(
     # Prepare ride data for plotting (with warmup clipped)
     ride_prepped = prep_time_axis(ride.df, warmup_pct=0.02)
 
+    # Reference estimator result (yellow baseline on all per-estimator charts)
+    ref_result = results.get(REFERENCE_ESTIMATOR)
+    ref_prepped = (
+        prep_time_axis(ref_result, warmup_pct=0.02) if ref_result is not None else None
+    )
+
     # Per-estimator: 1x3 (ETA error | MPE % | speed), time domain
     for name, result in results.items():
         result_prepped = prep_time_axis(result, warmup_pct=0.02)
+        is_ref = name == REFERENCE_ESTIMATOR
+
+        # Reference layers (yellow, behind the estimator line)
+        ref_layers: list[alt.Chart] = []
+        if ref_prepped is not None and not is_ref:
+            ref_layers = [
+                eta_error(
+                    ref_prepped, color=REF_COLOR, opacity=REF_OPACITY, stroke_width=1.0
+                ),
+                eta_error_pct(
+                    ref_prepped, color=REF_COLOR, opacity=REF_OPACITY, stroke_width=1.0
+                ),
+                speed_estimated(
+                    ref_prepped, color=REF_COLOR, opacity=REF_OPACITY, stroke_width=1.0
+                ),
+            ]
 
         error_chart = alt.layer(
             pause_bands(ride_prepped),
+            *(ref_layers[:1]),
             eta_error(result_prepped),
             error_refs(),
         ).properties(width=800, height=200)
 
         error_pct_chart = alt.layer(
             pause_bands(ride_prepped),
+            *(ref_layers[1:2]),
             eta_error_pct(result_prepped),
             error_pct_refs(),
         ).properties(width=800, height=200)
 
         speed_chart = alt.layer(
             pause_bands(ride_prepped),
+            *(ref_layers[2:3]),
             speed_comparison(ride_prepped, result_prepped),
         ).properties(width=800, height=200)
 
@@ -267,7 +325,15 @@ if __name__ == "__main__":
     }
     selected_metrics = args.metrics
 
-    col_to_name = {name.lower().replace(" ", "_"): name for name in ESTIMATORS}
+    # Build col_to_name from actual result columns (covers oracle estimators too)
+    all_names = {
+        c[: -len(s)]
+        for m in _METRIC_META.values()
+        for s in [m["suffix"]]
+        for c in results_df.columns
+        if c.endswith(s)
+    }
+    col_to_name = {k: k.replace("_", " ").title() for k in all_names}
     info_cols = [
         "ride",
         "distance_method",
