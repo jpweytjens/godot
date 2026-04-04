@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -512,6 +513,128 @@ class AdaptiveLerpSpeedEstimator(BaseEstimator):
         )
 
         return lerp(slow, fast, self._fast_weight)
+
+
+class OracleAdaptiveLerpEstimator(BaseEstimator):
+    """Adaptive lerp using the ride's actual moving average as prior.
+
+    Computes `prior_ms` from ride data inside `predict()`, then delegates
+    to an `AdaptiveLerpSpeedEstimator`. This tests the estimator mechanics
+    with a perfect prior.
+
+    Parameters
+    ----------
+    tau : float
+        Confidence decay span in seconds.
+    k : float
+        Floor multiplier on tau.
+    fast_span_s : float
+        EWMA span for the fast component.
+    fast_weight : float
+        Weight of the fast component in the final blend.
+    """
+
+    def __init__(
+        self,
+        tau: float = 300.0,
+        k: float = 2.0,
+        fast_span_s: float = 3600.0,
+        fast_weight: float = 0.15,
+    ) -> None:
+        self._tau = tau
+        self._k = k
+        self._fast_span_s = fast_span_s
+        self._fast_weight = fast_weight
+
+    def __str__(self) -> str:
+        return (
+            f"oracle adaptive lerp (τ={int(self._tau)}s, k={self._k}, "
+            f"fast={int(self._fast_span_s)}s, w={self._fast_weight})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"OracleAdaptiveLerpEstimator(tau={self._tau!r}, k={self._k!r}, "
+            f"fast_span_s={self._fast_span_s!r}, fast_weight={self._fast_weight!r})"
+        )
+
+    def _oracle_ms(self, ride: Ride) -> float:
+        df = ride.df
+        moving = ~df["paused"]
+        return float(
+            df.loc[moving, "delta_distance"].sum() / df.loc[moving, "delta_time"].sum()
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        inner = AdaptiveLerpSpeedEstimator(
+            prior_ms=self._oracle_ms(ride),
+            tau=self._tau,
+            k=self._k,
+            fast_span_s=self._fast_span_s,
+            fast_weight=self._fast_weight,
+        )
+        return inner.predict(ride)
+
+
+class NoisyOracleAdaptiveLerpEstimator(OracleAdaptiveLerpEstimator):
+    """Adaptive lerp using a noisy version of the ride's actual moving average.
+
+    Simulates a good-but-imperfect gradient-aware prior by adding
+    Gaussian noise to the oracle speed.
+
+    Parameters
+    ----------
+    tau : float
+        Confidence decay span in seconds.
+    k : float
+        Floor multiplier on tau.
+    fast_span_s : float
+        EWMA span for the fast component.
+    fast_weight : float
+        Weight of the fast component in the final blend.
+    cv : float
+        Coefficient of variation for the noise. Default 0.10 (10%).
+    seed : int
+        RNG seed for reproducibility.
+    """
+
+    def __init__(
+        self,
+        tau: float = 300.0,
+        k: float = 2.0,
+        fast_span_s: float = 3600.0,
+        fast_weight: float = 0.15,
+        cv: float = 0.10,
+        seed: int = 42,
+    ) -> None:
+        super().__init__(tau=tau, k=k, fast_span_s=fast_span_s, fast_weight=fast_weight)
+        self._cv = cv
+        self._rng = np.random.default_rng(seed)
+
+    def __str__(self) -> str:
+        return (
+            f"noisy oracle adaptive lerp (τ={int(self._tau)}s, k={self._k}, "
+            f"fast={int(self._fast_span_s)}s, w={self._fast_weight}, cv={self._cv})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"NoisyOracleAdaptiveLerpEstimator(tau={self._tau!r}, k={self._k!r}, "
+            f"fast_span_s={self._fast_span_s!r}, fast_weight={self._fast_weight!r}, "
+            f"cv={self._cv!r})"
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        oracle_ms = self._oracle_ms(ride)
+        noisy_ms = float(self._rng.normal(oracle_ms, oracle_ms * self._cv))
+        inner = AdaptiveLerpSpeedEstimator(
+            prior_ms=noisy_ms,
+            tau=self._tau,
+            k=self._k,
+            fast_span_s=self._fast_span_s,
+            fast_weight=self._fast_weight,
+        )
+        return inner.predict(ride)
 
 
 class PriorEWMASpeedEstimator(BaseEstimator):
