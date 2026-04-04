@@ -20,8 +20,10 @@ from eta.estimators import (
 from eta.pause import NoPause, SubtractElapsed
 from eta.plot import (
     comparison_errors,
+    error_pct_refs,
     error_refs,
     eta_error,
+    eta_error_pct,
     pause_bands,
     prep_time_axis,
     speed_comparison,
@@ -98,16 +100,16 @@ ESTIMATORS = {
     #     EWMASpeedEstimator(span_s=600, moving_only=True),
     #     SubtractElapsed(),
     # ),
-    "DEWMA 10+60 min (moving)": (
-        DEWMASpeedEstimator(
-            slow_span_s=3600,
-            fast_span_s=600,
-            slow_weight=0.7,
-            fast_weight=0.3,
-            moving_only=True,
-        ),
-        SubtractElapsed(),
-    ),
+    # "DEWMA 10+60 min (moving)": (
+    #     DEWMASpeedEstimator(
+    #         slow_span_s=3600,
+    #         fast_span_s=600,
+    #         slow_weight=0.7,
+    #         fast_weight=0.3,
+    #         moving_only=True,
+    #     ),
+    #     SubtractElapsed(),
+    # ),
     # "EWMA 10 min + prior (moving)": (
     #     PriorEWMASpeedEstimator(
     #         span_s=600,
@@ -116,16 +118,16 @@ ESTIMATORS = {
     #     ),
     #     SubtractElapsed(),
     # ),
-    "Lerp (moving)": (
-        LerpSpeedEstimator(
-            prior_ms=28.8 / 3.6,
-            fast_span_s=600,
-            ramp_s=600,
-            fast_weight=0.15,
-            moving_only=True,
-        ),
-        SubtractElapsed(),
-    ),
+    # "Lerp (moving)": (
+    #     LerpSpeedEstimator(
+    #         prior_ms=28.8 / 3.6,
+    #         fast_span_s=600,
+    #         ramp_s=600,
+    #         fast_weight=0.15,
+    #         moving_only=True,
+    #     ),
+    #     SubtractElapsed(),
+    # ),
     "Adaptive lerp": (
         AdaptiveLerpSpeedEstimator(
             prior_ms=28.8 / 3.6,
@@ -175,7 +177,7 @@ def run(
     # Prepare ride data for plotting (with warmup clipped)
     ride_prepped = prep_time_axis(ride.df, warmup_pct=0.02)
 
-    # Per-estimator: 1x2 (ETA error | speed), time domain
+    # Per-estimator: 1x3 (ETA error | MPE % | speed), time domain
     for name, result in results.items():
         result_prepped = prep_time_axis(result, warmup_pct=0.02)
 
@@ -185,12 +187,18 @@ def run(
             error_refs(),
         ).properties(width=800, height=200)
 
+        error_pct_chart = alt.layer(
+            pause_bands(ride_prepped),
+            eta_error_pct(result_prepped),
+            error_pct_refs(),
+        ).properties(width=800, height=200)
+
         speed_chart = alt.layer(
             pause_bands(ride_prepped),
             speed_comparison(ride_prepped, result_prepped),
         ).properties(width=800, height=200)
 
-        chart = (error_chart & speed_chart).properties(
+        chart = (error_chart & error_pct_chart & speed_chart).properties(
             title=alt.Title(f"{name} \u2014 {ride.label}")
         )
         safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
