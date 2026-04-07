@@ -6,15 +6,16 @@ import altair as alt
 import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
-from eta.benchmark import backtest, compute_metrics
-from eta.estimators import (
+from godot.benchmark import backtest, compute_metrics
+from godot.estimators import (
     AdaptiveLerpSpeedEstimator,
     AvgSpeedEstimator,
     NoisyOracleAdaptiveLerpEstimator,
     OracleAdaptiveLerpEstimator,
+    GradientPriorEstimator,
 )
-from eta.pause import NoPause
-from eta.plot import (
+from godot.pause import NoPause
+from godot.plot import (
     comparison_errors,
     error_pct_refs,
     error_refs,
@@ -23,14 +24,18 @@ from eta.plot import (
     pause_bands,
     prep_time_axis,
     speed_comparison,
-    speed_estimated,
 )
-from eta.ride import load_ride
-from eta.theme import TOL_BRIGHT
+from godot.ride import load_ride
+from godot.theme import TOL_BRIGHT
 
 REFERENCE_ESTIMATOR = "Average speed (total)"
 REF_COLOR = TOL_BRIGHT[3]  # yellow
 REF_OPACITY = 0.7
+
+# Load empirical gradient ratios
+_ratio_df = pd.read_parquet(Path("data/gradient_ratios.parquet"))
+GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
+GLOBAL_PRIOR_KMH = 28.8  # tunable flat-ground speed
 
 ESTIMATORS = {
     # "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), SubtractElapsed()),
@@ -111,6 +116,10 @@ ESTIMATORS = {
         ),
         NoPause(),
     ),
+    "Static gradient prior": (
+        GradientPriorEstimator(v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS),
+        NoPause(),
+    ),
 }
 
 
@@ -171,9 +180,6 @@ def run(
                 eta_error_pct(
                     ref_prepped, color=REF_COLOR, opacity=REF_OPACITY, stroke_width=1.0
                 ),
-                speed_estimated(
-                    ref_prepped, color=REF_COLOR, opacity=REF_OPACITY, stroke_width=1.0
-                ),
             ]
 
         error_chart = alt.layer(
@@ -192,8 +198,11 @@ def run(
 
         speed_chart = alt.layer(
             pause_bands(ride_prepped),
-            *(ref_layers[2:3]),
-            speed_comparison(ride_prepped, result_prepped),
+            speed_comparison(
+                ride_prepped,
+                result_prepped,
+                ref_df=ref_prepped if not is_ref else None,
+            ),
         ).properties(width=800, height=200)
 
         chart = (error_chart & error_pct_chart & speed_chart).properties(
@@ -295,6 +304,6 @@ if __name__ == "__main__":
         .reset_index(drop=True)
     )
 
-    from eta.report import write_html_report
+    from godot.report import write_html_report
 
     write_html_report(results_df, args.metrics, Path("output") / "results.html")
