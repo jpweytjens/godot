@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING, Protocol
 
 import pandas as pd
 
-from eta.gpx import pause_run_id
+from godot.gpx import pause_run_id
 
 if TYPE_CHECKING:
-    from eta.ride import Ride
+    from godot.ride import Ride
 
 
 class PauseStrategy(Protocol):

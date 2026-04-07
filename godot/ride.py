@@ -9,8 +9,8 @@ from typing import Sequence
 import pandas as pd
 from loguru import logger
 
-from eta.fit import read_fit
-from eta.gpx import (
+from godot.fit import read_fit
+from godot.gpx import (
     add_haversine_distance,
     add_integrated_distance,
     add_smooth_speed,
@@ -18,7 +18,7 @@ from eta.gpx import (
     pause_run_id,
     read_gpx,
 )
-from eta.plot import prep_time_axis
+from godot.plot import prep_time_axis
 from tqdm.contrib.concurrent import process_map
 
 _PARSERS = {

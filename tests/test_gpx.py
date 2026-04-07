@@ -1,7 +1,7 @@
 from pathlib import Path
 import pandas as pd
 import pytest
-from eta.gpx import (
+from godot.gpx import (
     read_gpx,
     add_haversine_distance,
     add_integrated_distance,

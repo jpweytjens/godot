@@ -1,5 +1,5 @@
 [project]
-name = "cycling-eta"
+name = "Godot"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -19,8 +19,4 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = [
-    "jupytext>=1.16.0",
-    "pytest>=9.0.2",
-    "ruff>=0.15.7",
-]
+dev = ["jupytext>=1.16.0", "pytest>=9.0.2", "ruff>=0.15.7"]

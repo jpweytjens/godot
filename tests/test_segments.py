@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from eta.segmentation import (
+from godot.segmentation import (
     decimate,
     perpendicular_distance,
     ramer_douglas_peucker,

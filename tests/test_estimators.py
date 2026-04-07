@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
-from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
-from eta.ride import Ride
+from godot.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from godot.ride import Ride
 
 
 def make_ride_with_pause(

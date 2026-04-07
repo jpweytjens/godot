@@ -4,10 +4,10 @@ from typing import TYPE_CHECKING, Protocol
 
 import pandas as pd
 
-from eta.pause import NoPause, PauseStrategy
+from godot.pause import NoPause, PauseStrategy
 
 if TYPE_CHECKING:
-    from eta.ride import Ride
+    from godot.ride import Ride
 
 
 class Estimator(Protocol):
@@ -57,12 +57,15 @@ def backtest(
     """
     if pause_strategy is None:
         pause_strategy = NoPause()
+
     df = ride.df
     speed_ms = estimator.predict(ride)
     speed_ms = pause_strategy.adjust(speed_ms, ride)
     remaining_m = ride.distance - df["distance_m"]
+
     ata_s = (df["time"].iloc[-1] - df["time"]).dt.total_seconds()
     eta_s = pause_strategy.fill_pauses(remaining_m / speed_ms, ride)
+
     return pd.DataFrame(
         {
             "time": df["time"].values,
@@ -91,8 +94,8 @@ def compute_metrics(
     Returns
     -------
     dict[str, float]
-        Keys: ``mae_min``, ``rmse_min`` (minutes),
-        ``mpe_pct``, ``mape_pct`` (percentage).
+        Keys: `mae_min`, `rmse_min` (minutes),
+        `mpe_pct`, `mape_pct` (percentage).
     """
     trimmed = result_df[result_df["distance_m"] >= warmup_distance_m].dropna(
         subset=["delta_s"]

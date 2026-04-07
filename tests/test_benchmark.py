@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
-from eta.benchmark import backtest, compute_metrics
-from eta.ride import Ride
+from godot.benchmark import backtest, compute_metrics
+from godot.ride import Ride
 
 
 class ConstantSpeedEstimator:
