@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
-from eta.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
-from eta.ride import Ride
+from godot.estimators import AvgSpeedEstimator, RollingAvgSpeedEstimator
+from godot.ride import Ride
 
 
 def make_ride(timestamps_ms, distances_m, speeds_kmh, paused=None):
@@ -59,7 +59,7 @@ class TestAvgSpeedEstimator:
     def test_constant_speed(self):
         speed_ms = 20 / 3.6
         ride = constant_ride(n=20, speed_kmh=20.0)
-        speed = AvgSpeedEstimator().predict(ride)
+        speed = AvgSpeedEstimator(min_periods=1).predict(ride)
         # After the first interval the expanding average should converge
         assert abs(speed.iloc[-1] - speed_ms) < 0.01
 
@@ -75,13 +75,21 @@ class TestAvgSpeedEstimator:
         speeds = [20.0] * 10 + [0.0] * 10 + [20.0] * 10
         ride = make_ride(ts, dist, speeds)
 
-        moving = AvgSpeedEstimator(moving_only=True).predict(ride)
-        total = AvgSpeedEstimator(moving_only=False).predict(ride)
+        moving = AvgSpeedEstimator(moving_only=True, min_periods=1).predict(ride)
+        total = AvgSpeedEstimator(moving_only=False, min_periods=1).predict(ride)
 
         # moving-only speed >= total-time speed (same distance, less time in denom)
         assert moving.iloc[-1] > total.iloc[-1]
         # moving-only should recover ~20 km/h
         assert abs(moving.iloc[-1] - speed_ms) < 0.5
+
+    def test_min_periods_suppresses_early_estimates(self):
+        ride = constant_ride(n=120, speed_kmh=20.0)
+        speed = AvgSpeedEstimator(min_periods=60).predict(ride)
+        # First 59 seconds should be NaN (cum_dt < 60)
+        assert speed.iloc[1:60].isna().all()
+        # After 60 seconds should have values
+        assert speed.iloc[60:].notna().all()
 
     def test_total_time_slower_when_stopped(self):
         # Stopped ride: speed never >= 1 km/h but distance recorded (e.g. GPS drift)
