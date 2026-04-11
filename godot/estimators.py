@@ -1094,19 +1094,25 @@ def _row_gradients(ride: Ride) -> tuple[pd.Series, list[RouteSegment]]:
     return gradients, segments
 
 
-def _gradient_bin_pct(gradient_frac: pd.Series) -> pd.Series:
-    """Convert fractional gradient to integer percent bin (floor)."""
-    return np.floor(gradient_frac * 100).astype(int)
+def _gradient_bin_pct(gradient_frac: pd.Series, bin_size: int = 1) -> pd.Series:
+    """Convert fractional gradient to binned percent (floor).
+
+    With ``bin_size=1`` (default), returns integer percent: 0.054 → 5.
+    With ``bin_size=3``, groups into 3%-wide bins: 0.054 → 3 (covers [3%, 6%)).
+    """
+    pct = np.floor(gradient_frac * 100)
+    if bin_size > 1:
+        pct = np.floor(pct / bin_size) * bin_size
+    return pct.astype(int)
 
 
 class BinnedAdaptivePhysicsEstimator(BaseEstimator):
     """Physics gradient prior with slow v_flat EWMA and per-bin fast corrections.
 
     Like `AdaptivePhysicsEstimator` but the fast EWMA runs per gradient
-    bin (1% integer bins). Each bin independently learns a correction for
-    its gradient, so a climb-specific error doesn't contaminate descent
-    predictions. Per-bin corrections are applied to both `predict()` (TTG)
-    and `predict_current()`.
+    bin. Each bin independently learns a correction for its gradient, so a
+    climb-specific error doesn't contaminate descent predictions. Per-bin
+    corrections are applied to both `predict()` (TTG) and `predict_current()`.
 
     Parameters
     ----------
@@ -1118,6 +1124,9 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         Span for the slow calibration EWMA. Default 3600 (60 min).
     fast_span_s : float, optional
         Span for the per-bin fast EWMA. Default 300 (5 min).
+    bin_size : int, optional
+        Gradient bin width in percent. Default 1 (1% bins).
+        Use 3 for coarser bins with more observations per bucket.
     cal_max_grad : float, optional
         Maximum |gradient| (fraction) for slow calibration. Default 0.02.
     cda, crr, rho : float, optional
@@ -1130,6 +1139,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         v_flat_kmh: float,
         slow_span_s: float = 3600.0,
         fast_span_s: float = 300.0,
+        bin_size: int = 1,
         cal_max_grad: float = 0.02,
         cda: float = 0.35,
         crr: float = 0.005,
@@ -1140,6 +1150,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         )
         self._slow_span_s = slow_span_s
         self._fast_span_s = fast_span_s
+        self._bin_size = bin_size
         self._cal_max_grad = cal_max_grad
 
     def __str__(self) -> str:
@@ -1150,14 +1161,14 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         )
         return (
             f"binned adaptive physics (slow={int(self._slow_span_s)}s [{cal}], "
-            f"fast={int(self._fast_span_s)}s/bin, {self._physics})"
+            f"fast={int(self._fast_span_s)}s/{self._bin_size}%bin, {self._physics})"
         )
 
     def __repr__(self) -> str:
         return (
             f"BinnedAdaptivePhysicsEstimator(physics={self._physics!r}, "
             f"slow_span_s={self._slow_span_s!r}, fast_span_s={self._fast_span_s!r}, "
-            f"cal_max_grad={self._cal_max_grad!r})"
+            f"bin_size={self._bin_size!r}, cal_max_grad={self._cal_max_grad!r})"
         )
 
     def _corrections(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
@@ -1172,7 +1183,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         ratio = self.safe_divide(actual, predicted)
 
         gradients, _ = _row_gradients(ride)
-        grad_bins = _gradient_bin_pct(gradients)
+        grad_bins = _gradient_bin_pct(gradients, self._bin_size)
 
         # Slow EWMA: flat-only (or all), scalar correction
         ratio_slow = ratio.where(gradients.abs() <= self._cal_max_grad)
@@ -1198,7 +1209,8 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         gradients, segments = _row_gradients(ride)
         df = ride.df
         v_flat = self._physics._v_flat_ms
-        grad_bins = _gradient_bin_pct(gradients)
+        grad_bins = _gradient_bin_pct(gradients, self._bin_size)
+        bs = self._bin_size
 
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -1206,7 +1218,9 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         seg_base_speeds = np.array(
             [v_flat * self._physics._ratio_for(s.gradient) for s in segments]
         )
-        seg_bins = np.array([int(np.floor(s.gradient * 100)) for s in segments])
+        seg_bins = np.array(
+            [int(np.floor(s.gradient * 100 / bs) * bs) for s in segments]
+        )
         seg_start_dists = np.array([s.start_distance_m for s in segments])
         seg_end_dists = np.array([s.end_distance_m for s in segments])
 
