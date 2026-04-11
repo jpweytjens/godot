@@ -34,6 +34,11 @@ class BaseEstimator:
     def predict(self, ride: Ride) -> pd.Series:
         """Return estimated speed in m/s at each row.
 
+        For ETA calculation: ``remaining_distance / predict()`` gives
+        estimated remaining time. For most estimators this equals the
+        instantaneous speed estimate. Gradient-aware estimators return
+        an effective route-weighted average instead.
+
         Parameters
         ----------
         ride : Ride
@@ -45,6 +50,19 @@ class BaseEstimator:
             Speed in m/s at each row. NaN where insufficient data exists.
         """
         raise NotImplementedError
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        """Return estimated *instantaneous* speed in m/s at each row.
+
+        What speed the rider is expected to be doing right now, given
+        the current gradient / conditions. Defaults to `predict()`,
+        which is correct for estimators where effective and instantaneous
+        speed are the same (rolling averages, EWMA, etc.).
+
+        Gradient-aware estimators override this to return
+        ``v_flat * ratio[current_gradient]`` per row.
+        """
+        return self.predict(ride)
 
 
 class AvgSpeedEstimator(BaseEstimator):
@@ -436,15 +454,15 @@ class AdaptiveLerpSpeedEstimator(BaseEstimator):
       ETA skyrocketing.
     - **fast**: 60-minute EWMA of instantaneous speed (moving-only),
       seeded with a prior for immediate estimates.
-    - **final**: ``lerp(slow, fast, fast_weight)``
+    - **final**: `lerp(slow, fast, fast_weight)`
 
-    During a pause, ``confidence = ewma(is_moving, span=tau)`` decays
-    exponentially, blending the slow component from ``avg_total`` toward
+    During a pause, `confidence = ewma(is_moving, span=tau)` decays
+    exponentially, blending the slow component from `avg_total` toward
     a floor derived from the ride data:
 
         floor = cumsum(dd) / (cumsum(dt_elapsed) + k * tau)
 
-    ``tau`` encodes typical pause length; ``k`` (default 2) accounts for
+    `tau` encodes typical pause length; `k` (default 2) accounts for
     longer-than-typical pauses.  The prior only seeds the fast EWMA at
     ride start.
 
@@ -456,7 +474,7 @@ class AdaptiveLerpSpeedEstimator(BaseEstimator):
         Confidence decay span in seconds. Controls how quickly the slow
         component falls back to the floor during a pause.
     k : float
-        Floor multiplier on tau. ``floor = distance / (elapsed + k*tau)``.
+        Floor multiplier on tau. `floor = distance / (elapsed + k*tau)`.
     fast_span_s : float
         EWMA span for the fast component.
     fast_weight : float
@@ -715,7 +733,7 @@ class GradientPriorEstimator(BaseEstimator):
 
     Uses decimated route segments and empirical speed ratios per gradient
     bin to estimate remaining time. For each row, sums
-    ``segment_distance / (v_flat * ratio[bin])`` over all remaining segments.
+    `segment_distance / (v_flat * ratio[bin])` over all remaining segments.
 
     Parameters
     ----------
@@ -791,6 +809,277 @@ class GradientPriorEstimator(BaseEstimator):
         safe_ttg = np.where(valid, ttg, 1.0)
         speed = np.where(valid, remaining / safe_ttg, np.nan)
         return pd.Series(speed, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        """Predicted instantaneous speed based on current segment gradient."""
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+        speed = np.array(
+            [self._v_flat_ms * self._ratio_for(segments[i].gradient) for i in idx]
+        )
+        return pd.Series(speed, index=df.index)
+
+
+def physics_gradient_ratios(
+    mass_kg: float,
+    v_flat_ms: float,
+    cda: float = 0.35,
+    crr: float = 0.005,
+    rho: float = 1.225,
+    grad_min_pct: int = -20,
+    grad_max_pct: int = 20,
+) -> dict[int, float]:
+    """Speed ratio per gradient from a constant-power cubic model.
+
+    Solves `r**3 + (beta*cos(theta) + alpha_prime*sin(theta)) * r = 1 + beta`
+    for each integer gradient bin, where
+    `alpha_prime = m * g / (k_a * v_flat**2)`,
+    `beta = Crr * alpha_prime`, `k_a = 0.5 * rho * CdA`
+    and `r = v(theta) / v_flat`. Cardano's closed form applies with
+    `-q/2 = (1 + beta) / 2`.
+
+    CdA and Crr are held fixed — they shift the cubic coefficients but
+    residual error is expected to be absorbed by downstream EWMA. Setting
+    `crr=0` recovers the drag-only model.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_ms : float
+        Reference flat-ground speed (m/s).
+    cda : float, optional
+        Drag area CdA (m**2). Default 0.35.
+    crr : float, optional
+        Rolling resistance coefficient. Default 0.005 (good road tires
+        on tarmac). Pass 0 to recover the drag-only model.
+    rho : float, optional
+        Air density (kg/m**3). Default 1.225.
+    grad_min_pct, grad_max_pct : int, optional
+        Inclusive integer gradient range in percent. Default -20..20.
+
+    Returns
+    -------
+    dict[int, float]
+        Integer gradient (%) -> speed ratio relative to `v_flat_ms`.
+    """
+    g = 9.81
+    k_a = 0.5 * rho * cda
+    alpha_prime = (mass_kg * g) / (k_a * v_flat_ms**2)
+    beta = crr * alpha_prime
+    half_rhs = (1 + beta) / 2  # = -q / 2
+
+    ratios: dict[int, float] = {}
+    for pct in range(grad_min_pct, grad_max_pct + 1):
+        theta = math.atan(pct / 100)
+        sin_t = math.sin(theta)
+        cos_t = math.cos(theta)
+        p = beta * cos_t + alpha_prime * sin_t
+
+        disc = half_rhs**2 + (p**3) / 27
+        if disc >= 0:
+            sqrt_d = math.sqrt(disc)
+            r = math.cbrt(half_rhs + sqrt_d) + math.cbrt(half_rhs - sqrt_d)
+        else:
+            # Casus irreducibilis — trig form, k=0 gives the largest root
+            amp = 2 * math.sqrt(-p / 3)
+            phi = math.acos(-3 * half_rhs / p * math.sqrt(-3 / p))
+            r = amp * math.cos(phi / 3)
+
+        ratios[pct] = r
+    return ratios
+
+
+class PhysicsGradientPriorEstimator(GradientPriorEstimator):
+    """Gradient-aware ETA estimator with ratios from a constant-power model.
+
+    Builds speed ratios from rider mass and an assumed flat speed via the
+    cubic power balance
+    `P = 0.5 * rho * CdA * v**3 + Crr * m * g * cos(theta) * v
+    + m * g * sin(theta) * v`,
+    then delegates to `GradientPriorEstimator` for forward-looking time-to-go.
+
+    The only rider input is mass; CdA and Crr are held at typical fixed
+    values.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Assumed flat-ground speed (km/h).
+    cda : float, optional
+        Drag area CdA (m**2). Default 0.35.
+    crr : float, optional
+        Rolling resistance coefficient. Default 0.005.
+    rho : float, optional
+        Air density (kg/m**3). Default 1.225.
+    grad_min_pct, grad_max_pct : int, optional
+        Inclusive range of gradient bins to precompute.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+        grad_min_pct: int = -20,
+        grad_max_pct: int = 20,
+    ) -> None:
+        ratios = physics_gradient_ratios(
+            mass_kg=mass_kg,
+            v_flat_ms=v_flat_kmh / 3.6,
+            cda=cda,
+            crr=crr,
+            rho=rho,
+            grad_min_pct=grad_min_pct,
+            grad_max_pct=grad_max_pct,
+        )
+        super().__init__(v_flat_kmh=v_flat_kmh, ratios=ratios)
+        self._mass_kg = mass_kg
+        self._cda = cda
+        self._crr = crr
+        self._rho = rho
+
+    def __str__(self) -> str:
+        return (
+            f"physics gradient prior ({self._v_flat_ms * 3.6:.1f} km/h flat, "
+            f"m={self._mass_kg:.0f}kg, CdA={self._cda}, Crr={self._crr})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PhysicsGradientPriorEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, cda={self._cda!r}, "
+            f"crr={self._crr!r}, rho={self._rho!r})"
+        )
+
+
+class AdaptivePhysicsEstimator(BaseEstimator):
+    """Physics gradient prior with dual-EWMA calibration.
+
+    Combines the forward-looking gradient-aware TTG from
+    `PhysicsGradientPriorEstimator` with two learned corrections:
+
+    - **slow**: EWMA of ``actual_speed / physics_predicted_speed``,
+      optionally restricted to near-flat rows (|gradient| < `cal_max_grad`).
+      Learns the rider's true v_flat without gradient-correlated bias.
+    - **fast**: EWMA of the residual after slow correction, using all
+      gradients. Catches short-term deviations (wind, fatigue, drafting).
+
+    The combined correction scales the physics prediction:
+    ``calibrated = physics * slow * fast``. At ride start both corrections
+    are 1.0, so the pure physics prior is used.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Prior flat-ground speed (km/h).
+    slow_span_s : float, optional
+        Span for the slow calibration EWMA. Default 3600 (60 min).
+    fast_span_s : float, optional
+        Span for the fast correction EWMA. Default 300 (5 min).
+    cal_max_grad : float, optional
+        Maximum |gradient| (as fraction) for slow calibration data.
+        Default 0.02 (2%). Set to 1.0 to use all gradients.
+    cda : float, optional
+        Drag area CdA (m**2). Default 0.35.
+    crr : float, optional
+        Rolling resistance coefficient. Default 0.005.
+    rho : float, optional
+        Air density (kg/m**3). Default 1.225.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        slow_span_s: float = 3600.0,
+        fast_span_s: float = 300.0,
+        cal_max_grad: float = 0.02,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+    ) -> None:
+        self._physics = PhysicsGradientPriorEstimator(
+            mass_kg=mass_kg, v_flat_kmh=v_flat_kmh, cda=cda, crr=crr, rho=rho
+        )
+        self._slow_span_s = slow_span_s
+        self._fast_span_s = fast_span_s
+        self._cal_max_grad = cal_max_grad
+
+    def __str__(self) -> str:
+        cal = (
+            f"|g|<{self._cal_max_grad * 100:.0f}%"
+            if self._cal_max_grad < 1.0
+            else "all"
+        )
+        return (
+            f"adaptive physics (slow={int(self._slow_span_s)}s [{cal}], "
+            f"fast={int(self._fast_span_s)}s, {self._physics})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"AdaptivePhysicsEstimator(physics={self._physics!r}, "
+            f"slow_span_s={self._slow_span_s!r}, fast_span_s={self._fast_span_s!r}, "
+            f"cal_max_grad={self._cal_max_grad!r})"
+        )
+
+    def _corrections(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        """Compute slow and fast EWMA correction factors."""
+        df = ride.df
+        moving = ~df["paused"]
+
+        # Actual instantaneous speed (moving rows only)
+        actual = self.safe_divide(df["delta_distance"], df["delta_time"])
+        actual = actual.where(moving)
+
+        # Physics predicted speed at current gradient
+        predicted = self._physics.predict_current(ride)
+
+        # Residual ratio: actual / predicted
+        ratio = self.safe_divide(actual, predicted)
+
+        # Slow EWMA: optionally flat-only
+        _, segments = decimate_to_gradient_segments(df)
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        seg_idx = np.searchsorted(seg_ends, df["distance_m"].values, side="left").clip(
+            max=len(segments) - 1
+        )
+        gradients = pd.Series([segments[i].gradient for i in seg_idx], index=df.index)
+        ratio_slow = ratio.where(gradients.abs() <= self._cal_max_grad)
+        slow = (
+            ratio_slow.ewm(span=self._slow_span_s, min_periods=1)
+            .mean()
+            .ffill()
+            .fillna(1.0)
+        )
+
+        # Fast EWMA: residual after slow correction, all gradients
+        ratio_fast = self.safe_divide(actual, predicted * slow)
+        fast = ratio_fast.ewm(span=self._fast_span_s, min_periods=1).mean().fillna(1.0)
+
+        return slow, fast
+
+    def predict(self, ride: Ride) -> pd.Series:
+        slow, _ = self._corrections(ride)
+        base = self._physics.predict(ride)
+        return base * slow
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        slow, fast = self._corrections(ride)
+        base = self._physics.predict_current(ride)
+        return base * slow * fast
 
 
 class PriorDEWMASpeedEstimator(BaseEstimator):
