@@ -11,6 +11,7 @@ from godot.estimators import (
     AdaptiveLerpSpeedEstimator,
     AdaptivePhysicsEstimator,
     AvgSpeedEstimator,
+    BinnedAdaptivePhysicsEstimator,
     NoisyOracleAdaptiveLerpEstimator,
     OracleAdaptiveLerpEstimator,
     GradientPriorEstimator,
@@ -145,6 +146,13 @@ ESTIMATORS = {
             mass_kg=80,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
             cal_max_grad=1.0,
+        ),
+        WallClockPause(),
+    ),
+    "Binned adaptive physics": (
+        BinnedAdaptivePhysicsEstimator(
+            mass_kg=80,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),
         WallClockPause(),
     ),

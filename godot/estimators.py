@@ -1082,6 +1082,175 @@ class AdaptivePhysicsEstimator(BaseEstimator):
         return base * slow * fast
 
 
+def _row_gradients(ride: Ride) -> tuple[pd.Series, list[RouteSegment]]:
+    """Per-row gradient (fraction) and segment list from decimated route."""
+    df = ride.df
+    _, segments = decimate_to_gradient_segments(df)
+    seg_ends = np.array([s.end_distance_m for s in segments])
+    seg_idx = np.searchsorted(seg_ends, df["distance_m"].values, side="left").clip(
+        max=len(segments) - 1
+    )
+    gradients = pd.Series([segments[i].gradient for i in seg_idx], index=df.index)
+    return gradients, segments
+
+
+def _gradient_bin_pct(gradient_frac: pd.Series) -> pd.Series:
+    """Convert fractional gradient to integer percent bin (floor)."""
+    return np.floor(gradient_frac * 100).astype(int)
+
+
+class BinnedAdaptivePhysicsEstimator(BaseEstimator):
+    """Physics gradient prior with slow v_flat EWMA and per-bin fast corrections.
+
+    Like `AdaptivePhysicsEstimator` but the fast EWMA runs per gradient
+    bin (1% integer bins). Each bin independently learns a correction for
+    its gradient, so a climb-specific error doesn't contaminate descent
+    predictions. Per-bin corrections are applied to both `predict()` (TTG)
+    and `predict_current()`.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Prior flat-ground speed (km/h).
+    slow_span_s : float, optional
+        Span for the slow calibration EWMA. Default 3600 (60 min).
+    fast_span_s : float, optional
+        Span for the per-bin fast EWMA. Default 300 (5 min).
+    cal_max_grad : float, optional
+        Maximum |gradient| (fraction) for slow calibration. Default 0.02.
+    cda, crr, rho : float, optional
+        Physics model parameters.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        slow_span_s: float = 3600.0,
+        fast_span_s: float = 300.0,
+        cal_max_grad: float = 0.02,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+    ) -> None:
+        self._physics = PhysicsGradientPriorEstimator(
+            mass_kg=mass_kg, v_flat_kmh=v_flat_kmh, cda=cda, crr=crr, rho=rho
+        )
+        self._slow_span_s = slow_span_s
+        self._fast_span_s = fast_span_s
+        self._cal_max_grad = cal_max_grad
+
+    def __str__(self) -> str:
+        cal = (
+            f"|g|<{self._cal_max_grad * 100:.0f}%"
+            if self._cal_max_grad < 1.0
+            else "all"
+        )
+        return (
+            f"binned adaptive physics (slow={int(self._slow_span_s)}s [{cal}], "
+            f"fast={int(self._fast_span_s)}s/bin, {self._physics})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"BinnedAdaptivePhysicsEstimator(physics={self._physics!r}, "
+            f"slow_span_s={self._slow_span_s!r}, fast_span_s={self._fast_span_s!r}, "
+            f"cal_max_grad={self._cal_max_grad!r})"
+        )
+
+    def _corrections(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        """Slow scalar EWMA + per-bin fast EWMA corrections."""
+        df = ride.df
+        moving = ~df["paused"]
+
+        actual = self.safe_divide(df["delta_distance"], df["delta_time"])
+        actual = actual.where(moving)
+
+        predicted = self._physics.predict_current(ride)
+        ratio = self.safe_divide(actual, predicted)
+
+        gradients, _ = _row_gradients(ride)
+        grad_bins = _gradient_bin_pct(gradients)
+
+        # Slow EWMA: flat-only (or all), scalar correction
+        ratio_slow = ratio.where(gradients.abs() <= self._cal_max_grad)
+        slow = (
+            ratio_slow.ewm(span=self._slow_span_s, min_periods=1)
+            .mean()
+            .ffill()
+            .fillna(1.0)
+        )
+
+        # Per-bin fast EWMA: residual after slow correction
+        ratio_fast = self.safe_divide(actual, predicted * slow)
+        fast = pd.Series(1.0, index=df.index)
+        for bin_pct, grp in ratio_fast.groupby(grad_bins):
+            bin_ewma = grp.ewm(span=self._fast_span_s, min_periods=1).mean()
+            fast.loc[bin_ewma.index] = bin_ewma
+        fast = fast.fillna(1.0)
+
+        return slow, fast
+
+    def predict(self, ride: Ride) -> pd.Series:
+        slow, fast = self._corrections(ride)
+        gradients, segments = _row_gradients(ride)
+        df = ride.df
+        v_flat = self._physics._v_flat_ms
+        grad_bins = _gradient_bin_pct(gradients)
+
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        seg_base_speeds = np.array(
+            [v_flat * self._physics._ratio_for(s.gradient) for s in segments]
+        )
+        seg_bins = np.array([int(np.floor(s.gradient * 100)) for s in segments])
+        seg_start_dists = np.array([s.start_distance_m for s in segments])
+        seg_end_dists = np.array([s.end_distance_m for s in segments])
+
+        # Scan forward: accumulate per-bin fast corrections and compute TTG
+        ttg = np.empty(len(distances))
+        running_bin_fast: dict[int, float] = {}
+
+        for i in range(len(df)):
+            b = int(grad_bins.iloc[i])
+            f = fast.iloc[i]
+            if not np.isnan(f):
+                running_bin_fast[b] = f
+
+            slow_i = slow.iloc[i]
+            d = distances[i]
+
+            si = int(np.searchsorted(seg_end_dists, d, side="right"))
+            si = min(si, len(segments) - 1)
+
+            t = 0.0
+            for j in range(si, len(segments)):
+                seg_start = (
+                    max(seg_start_dists[j], d) if j == si else seg_start_dists[j]
+                )
+                seg_len = seg_end_dists[j] - seg_start
+                if seg_len <= 0:
+                    continue
+                bin_corr = running_bin_fast.get(seg_bins[j], 1.0)
+                t += seg_len / (seg_base_speeds[j] * slow_i * bin_corr)
+
+            ttg[i] = t
+
+        remaining = total_dist - distances
+        valid = (ttg > 0) & (remaining > 0)
+        safe_ttg = np.where(valid, ttg, 1.0)
+        speed = np.where(valid, remaining / safe_ttg, np.nan)
+        return pd.Series(speed, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        slow, fast = self._corrections(ride)
+        base = self._physics.predict_current(ride)
+        return base * slow * fast
+
+
 class PriorDEWMASpeedEstimator(BaseEstimator):
     """Double EWMA speed estimator seeded with a prior.
 
