@@ -962,15 +962,59 @@ class PhysicsGradientPriorEstimator(GradientPriorEstimator):
         )
 
 
+def _slow_correction(
+    ratio: pd.Series,
+    gradients: pd.Series,
+    moving: pd.Series,
+    cal_max_grad: float,
+    slow_span_s: float,
+    ramp_s: float,
+) -> pd.Series:
+    """Slow v_flat correction with startup ramp.
+
+    Blends a fast-converging expanding mean (startup) into a stable
+    EWMA (long-term) over `ramp_s` moving seconds.
+
+    Parameters
+    ----------
+    ratio : pd.Series
+        actual_speed / physics_predicted_speed per row.
+    gradients : pd.Series
+        Per-row gradient as fraction.
+    moving : pd.Series
+        Boolean mask, True when riding.
+    cal_max_grad : float
+        |gradient| threshold for calibration data.
+    slow_span_s : float
+        EWMA span for long-term correction.
+    ramp_s : float
+        Moving seconds over which startup hands off to EWMA.
+    """
+    ratio_flat = ratio.where(gradients.abs() <= cal_max_grad)
+
+    # Startup: expanding mean using ALL gradients (converges fast,
+    # accepts gradient bias because a biased correction beats no correction)
+    startup = ratio.expanding(min_periods=1).mean().ffill().fillna(1.0)
+
+    # Long-term: stable EWMA on flat-only data
+    ewma = ratio_flat.ewm(span=slow_span_s, min_periods=1).mean().ffill().fillna(1.0)
+
+    # Ramp: startup → EWMA over ramp_s moving seconds
+    moving_s = moving.astype(float).cumsum()
+    ramp = (moving_s / ramp_s).clip(0.0, 1.0)
+    return lerp(startup, ewma, ramp)
+
+
 class AdaptivePhysicsEstimator(BaseEstimator):
     """Physics gradient prior with dual-EWMA calibration.
 
     Combines the forward-looking gradient-aware TTG from
     `PhysicsGradientPriorEstimator` with two learned corrections:
 
-    - **slow**: EWMA of ``actual_speed / physics_predicted_speed``,
-      optionally restricted to near-flat rows (|gradient| < `cal_max_grad`).
-      Learns the rider's true v_flat without gradient-correlated bias.
+    - **slow**: v_flat correction with startup ramp. An expanding mean
+      converges fast at ride start, then hands off to a stable EWMA
+      over `ramp_s` moving seconds. Optionally restricted to near-flat
+      rows (|gradient| < `cal_max_grad`).
     - **fast**: EWMA of the residual after slow correction, using all
       gradients. Catches short-term deviations (wind, fatigue, drafting).
 
@@ -988,6 +1032,8 @@ class AdaptivePhysicsEstimator(BaseEstimator):
         Span for the slow calibration EWMA. Default 3600 (60 min).
     fast_span_s : float, optional
         Span for the fast correction EWMA. Default 300 (5 min).
+    ramp_s : float, optional
+        Moving seconds for startup→EWMA handoff. Default 600 (10 min).
     cal_max_grad : float, optional
         Maximum |gradient| (as fraction) for slow calibration data.
         Default 0.02 (2%). Set to 1.0 to use all gradients.
@@ -1005,6 +1051,7 @@ class AdaptivePhysicsEstimator(BaseEstimator):
         v_flat_kmh: float,
         slow_span_s: float = 3600.0,
         fast_span_s: float = 300.0,
+        ramp_s: float = 600.0,
         cal_max_grad: float = 0.02,
         cda: float = 0.35,
         crr: float = 0.005,
@@ -1015,6 +1062,7 @@ class AdaptivePhysicsEstimator(BaseEstimator):
         )
         self._slow_span_s = slow_span_s
         self._fast_span_s = fast_span_s
+        self._ramp_s = ramp_s
         self._cal_max_grad = cal_max_grad
 
     def __str__(self) -> str:
@@ -1025,14 +1073,14 @@ class AdaptivePhysicsEstimator(BaseEstimator):
         )
         return (
             f"adaptive physics (slow={int(self._slow_span_s)}s [{cal}], "
-            f"fast={int(self._fast_span_s)}s, {self._physics})"
+            f"fast={int(self._fast_span_s)}s, ramp={int(self._ramp_s)}s, {self._physics})"
         )
 
     def __repr__(self) -> str:
         return (
             f"AdaptivePhysicsEstimator(physics={self._physics!r}, "
             f"slow_span_s={self._slow_span_s!r}, fast_span_s={self._fast_span_s!r}, "
-            f"cal_max_grad={self._cal_max_grad!r})"
+            f"ramp_s={self._ramp_s!r}, cal_max_grad={self._cal_max_grad!r})"
         )
 
     def _corrections(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
@@ -1040,29 +1088,21 @@ class AdaptivePhysicsEstimator(BaseEstimator):
         df = ride.df
         moving = ~df["paused"]
 
-        # Actual instantaneous speed (moving rows only)
         actual = self.safe_divide(df["delta_distance"], df["delta_time"])
         actual = actual.where(moving)
 
-        # Physics predicted speed at current gradient
         predicted = self._physics.predict_current(ride)
-
-        # Residual ratio: actual / predicted
         ratio = self.safe_divide(actual, predicted)
 
-        # Slow EWMA: optionally flat-only
-        _, segments = decimate_to_gradient_segments(df)
-        seg_ends = np.array([s.end_distance_m for s in segments])
-        seg_idx = np.searchsorted(seg_ends, df["distance_m"].values, side="left").clip(
-            max=len(segments) - 1
-        )
-        gradients = pd.Series([segments[i].gradient for i in seg_idx], index=df.index)
-        ratio_slow = ratio.where(gradients.abs() <= self._cal_max_grad)
-        slow = (
-            ratio_slow.ewm(span=self._slow_span_s, min_periods=1)
-            .mean()
-            .ffill()
-            .fillna(1.0)
+        gradients, _ = _row_gradients(ride)
+
+        slow = _slow_correction(
+            ratio,
+            gradients,
+            moving,
+            self._cal_max_grad,
+            self._slow_span_s,
+            self._ramp_s,
         )
 
         # Fast EWMA: residual after slow correction, all gradients
@@ -1124,6 +1164,8 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         Span for the slow calibration EWMA. Default 3600 (60 min).
     fast_span_s : float, optional
         Span for the per-bin fast EWMA. Default 300 (5 min).
+    ramp_s : float, optional
+        Moving seconds for startup→EWMA handoff. Default 600 (10 min).
     bin_size : int, optional
         Gradient bin width in percent. Default 1 (1% bins).
         Use 3 for coarser bins with more observations per bucket.
@@ -1139,6 +1181,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         v_flat_kmh: float,
         slow_span_s: float = 3600.0,
         fast_span_s: float = 300.0,
+        ramp_s: float = 600.0,
         bin_size: int = 1,
         cal_max_grad: float = 0.02,
         cda: float = 0.35,
@@ -1150,6 +1193,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         )
         self._slow_span_s = slow_span_s
         self._fast_span_s = fast_span_s
+        self._ramp_s = ramp_s
         self._bin_size = bin_size
         self._cal_max_grad = cal_max_grad
 
@@ -1161,18 +1205,20 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         )
         return (
             f"binned adaptive physics (slow={int(self._slow_span_s)}s [{cal}], "
-            f"fast={int(self._fast_span_s)}s/{self._bin_size}%bin, {self._physics})"
+            f"fast={int(self._fast_span_s)}s/{self._bin_size}%bin, "
+            f"ramp={int(self._ramp_s)}s, {self._physics})"
         )
 
     def __repr__(self) -> str:
         return (
             f"BinnedAdaptivePhysicsEstimator(physics={self._physics!r}, "
             f"slow_span_s={self._slow_span_s!r}, fast_span_s={self._fast_span_s!r}, "
-            f"bin_size={self._bin_size!r}, cal_max_grad={self._cal_max_grad!r})"
+            f"ramp_s={self._ramp_s!r}, bin_size={self._bin_size!r}, "
+            f"cal_max_grad={self._cal_max_grad!r})"
         )
 
     def _corrections(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
-        """Slow scalar EWMA + per-bin fast EWMA corrections."""
+        """Slow correction with startup ramp + per-bin fast EWMA."""
         df = ride.df
         moving = ~df["paused"]
 
@@ -1185,13 +1231,13 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         gradients, _ = _row_gradients(ride)
         grad_bins = _gradient_bin_pct(gradients, self._bin_size)
 
-        # Slow EWMA: flat-only (or all), scalar correction
-        ratio_slow = ratio.where(gradients.abs() <= self._cal_max_grad)
-        slow = (
-            ratio_slow.ewm(span=self._slow_span_s, min_periods=1)
-            .mean()
-            .ffill()
-            .fillna(1.0)
+        slow = _slow_correction(
+            ratio,
+            gradients,
+            moving,
+            self._cal_max_grad,
+            self._slow_span_s,
+            self._ramp_s,
         )
 
         # Per-bin fast EWMA: residual after slow correction
