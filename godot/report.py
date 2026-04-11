@@ -11,6 +11,9 @@ _METRIC_META = {
     "rmse": {"suffix": "_rmse", "label": "RMSE", "fmt": "{:.2f}"},
     "mpe": {"suffix": "_mpe", "label": "MPE%", "fmt": "{:.1f}"},
     "mape": {"suffix": "_mape", "label": "MAPE%", "fmt": "{:.1f}"},
+    "mov_mae": {"suffix": "_mov_mae", "label": "Mov MAE", "fmt": "{:.2f}"},
+    "mov_mpe": {"suffix": "_mov_mpe", "label": "Mov MPE%", "fmt": "{:.1f}"},
+    "mov_mape": {"suffix": "_mov_mape", "label": "Mov MAPE%", "fmt": "{:.1f}"},
 }
 
 _INFO_COLS = [
@@ -121,6 +124,11 @@ def write_html_report(
     by_type_df = (
         results_df.groupby("route_type")[metric_cols].mean().rename(columns=agg_rename)
     )
+    by_type_pauses_df = (
+        results_df.groupby(["route_type", "contains_pauses"])[metric_cols]
+        .mean()
+        .rename(columns=agg_rename)
+    )
     by_pipeline_df = (
         results_df.groupby(["distance_method", "speed_smoothed"])[metric_cols]
         .mean()
@@ -170,6 +178,12 @@ def write_html_report(
         .set_caption("Averages by route type")
         .to_html()
     )
+    by_type_pauses_html = (
+        by_type_pauses_df.style.format(fmt_map)
+        .set_table_styles(_STYLES)
+        .set_caption("Averages by route type × pauses")
+        .to_html()
+    )
     by_pipeline_html = (
         by_pipeline_df.style.format(fmt_map)
         .set_table_styles(_STYLES)
@@ -187,6 +201,7 @@ def write_html_report(
         f"<h2>Per-ride metrics</h2>{per_ride_html}"
         f"<h2>Global averages</h2>{global_html}"
         f"<h2>Averages by route type</h2>{by_type_html}"
+        f"<h2>Averages by route type × pauses</h2>{by_type_pauses_html}"
         f"<h2>Averages by pipeline</h2>{by_pipeline_html}"
         "</body></html>"
     )

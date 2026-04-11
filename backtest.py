@@ -286,14 +286,18 @@ def run(
     }
     warmup_m = ride.distance * 0.02
     for name, result in results.items():
-        _, pause = ESTIMATORS[name]
-        moving = isinstance(pause, WallClockPause)
-        metrics = compute_metrics(result, warmup_m, moving_only=moving)
         col = name.lower().replace(" ", "_")
-        row[f"{col}_mae"] = metrics["mae_min"]
-        row[f"{col}_rmse"] = metrics["rmse_min"]
-        row[f"{col}_mpe"] = metrics["mpe_pct"]
-        row[f"{col}_mape"] = metrics["mape_pct"]
+        # Wall-clock metrics (vs total remaining time)
+        wc = compute_metrics(result, warmup_m, moving_only=False)
+        row[f"{col}_mae"] = wc["mae_min"]
+        row[f"{col}_rmse"] = wc["rmse_min"]
+        row[f"{col}_mpe"] = wc["mpe_pct"]
+        row[f"{col}_mape"] = wc["mape_pct"]
+        # Moving-time metrics (vs remaining moving time)
+        mv = compute_metrics(result, warmup_m, moving_only=True)
+        row[f"{col}_mov_mae"] = mv["mae_min"]
+        row[f"{col}_mov_mpe"] = mv["mpe_pct"]
+        row[f"{col}_mov_mape"] = mv["mape_pct"]
     return row
 
 
@@ -330,10 +334,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--metrics",
         nargs="+",
-        choices=["mae", "rmse", "mpe", "mape"],
-        default=["mae", "mpe", "mape"],
+        choices=["mae", "rmse", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"],
+        default=["mae", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"],
         metavar="METRIC",
-        help="Metrics to display (default: mae mpe mape)",
+        help="Metrics to display (default: mae mpe mape mov_mae mov_mpe mov_mape)",
     )
     args = parser.parse_args()
 
