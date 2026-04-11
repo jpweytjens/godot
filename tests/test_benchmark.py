@@ -52,9 +52,12 @@ def test_backtest_columns():
         "time",
         "distance_m",
         "speed_ms",
+        "current_speed_ms",
         "eta_remaining_s",
         "ata_remaining_s",
+        "ata_moving_s",
         "delta_s",
+        "delta_moving_s",
     ]
 
 
