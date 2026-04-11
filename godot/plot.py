@@ -207,12 +207,173 @@ def eta_countdown(result_df: pd.DataFrame) -> alt.Chart:
     )
 
 
+LEGEND_BOTTOM = alt.Legend(
+    title=None,
+    orient="bottom",
+    direction="horizontal",
+    strokeColor="#ccc",
+    padding=6,
+    symbolStrokeWidth=3,
+    symbolSize=200,
+)
+
+
+def avg_speed_overview(
+    ride_df: pd.DataFrame,
+    ref_total_df: pd.DataFrame | None = None,
+    ref_moving_df: pd.DataFrame | None = None,
+) -> alt.Chart:
+    """Estimated expanding avg speeds converging toward actual avg (horizontal).
+
+    Shows:
+    - Actual speed (60s mean) — faint background, the quantity being averaged
+    - Actual total avg — horizontal dashed line (final ride value)
+    - Actual moving avg — horizontal dashed line (final ride value)
+    - Est. total avg — solid expanding line converging toward actual total
+    - Est. moving avg — solid expanding line converging toward actual moving
+
+    Parameters
+    ----------
+    ride_df : pd.DataFrame
+        Prepped ride DataFrame.
+    ref_total_df : pd.DataFrame, optional
+        Backtest result from total-time avg speed estimator.
+    ref_moving_df : pd.DataFrame, optional
+        Backtest result from moving-time avg speed estimator.
+    """
+    smoothed = ride_df["speed_kmh"].rolling(60, min_periods=1, center=True).mean()
+
+    # Actual final averages — constant horizontal lines via full-length series
+    dd = ride_df["delta_distance"]
+    dt = ride_df["delta_time"]
+    moving = ~ride_df["paused"]
+    total_dist = dd.sum()
+    actual_total_kmh = total_dist / dt.sum() * 3.6
+    actual_moving_kmh = total_dist / (dt * moving).sum() * 3.6
+
+    elapsed = ride_df[["elapsed_min"]]
+    frames = [
+        elapsed.assign(speed_kmh=smoothed, series="Actual (60s mean)"),
+        elapsed.assign(speed_kmh=actual_total_kmh, series="Actual total avg"),
+        elapsed.assign(speed_kmh=actual_moving_kmh, series="Actual moving avg"),
+    ]
+    series = ["Actual (60s mean)", "Actual total avg", "Actual moving avg"]
+    colors = ["#888", TOL_BRIGHT[3], TOL_BRIGHT[4]]
+    widths = [0.8, 1.2, 1.2]
+    dashes = [[1, 0], [6, 3], [6, 3]]
+
+    if ref_total_df is not None:
+        frames.append(
+            ref_total_df[["elapsed_min"]].assign(
+                speed_kmh=ref_total_df["speed_ms"] * 3.6, series="Est. total avg"
+            )
+        )
+        series.append("Est. total avg")
+        colors.append(TOL_BRIGHT[3])
+        widths.append(1.5)
+        dashes.append([1, 0])
+
+    if ref_moving_df is not None:
+        frames.append(
+            ref_moving_df[["elapsed_min"]].assign(
+                speed_kmh=ref_moving_df["speed_ms"] * 3.6, series="Est. moving avg"
+            )
+        )
+        series.append("Est. moving avg")
+        colors.append(TOL_BRIGHT[4])
+        widths.append(1.5)
+        dashes.append([1, 0])
+
+    combined = pd.concat(frames, ignore_index=True)
+    return (
+        alt.Chart(combined)
+        .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("speed_kmh:Q")
+            .title("Speed (km/h)")
+            .scale(domain=[0, 40], clamp=True),
+            color=alt.Color("series:N")
+            .scale(domain=series, range=colors)
+            .legend(LEGEND_BOTTOM),
+            strokeWidth=alt.StrokeWidth("series:N")
+            .scale(domain=series, range=widths)
+            .legend(None),
+            strokeDash=alt.StrokeDash("series:N")
+            .scale(domain=series, range=dashes)
+            .legend(None),
+        )
+    )
+
+
+def actual_speed(
+    ride_df: pd.DataFrame,
+    result_df: pd.DataFrame | None = None,
+) -> alt.Chart:
+    """Actual speed with optional estimator effective speed overlay.
+
+    Parameters
+    ----------
+    ride_df : pd.DataFrame
+        Prepped ride DataFrame with `elapsed_min` and `speed_kmh`.
+    result_df : pd.DataFrame, optional
+        Estimator backtest result with `speed_ms` and `elapsed_min`.
+    """
+    smoothed = ride_df[["elapsed_min"]].assign(
+        speed_kmh=ride_df["speed_kmh"].rolling(60, min_periods=1, center=True).mean(),
+        series="Actual (60s mean)",
+    )
+    frames = [
+        ride_df[["elapsed_min", "speed_kmh"]].assign(series="Actual"),
+        smoothed,
+    ]
+    series = ["Actual", "Actual (60s mean)"]
+    colors = ["#888", "#333"]
+    opacities = [0.2, 0.8]
+    widths = [0.5, 1.2]
+
+    if result_df is not None:
+        speed_col = (
+            "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
+        )
+        frames.append(
+            result_df[["elapsed_min"]].assign(
+                speed_kmh=result_df[speed_col] * 3.6, series="Estimated"
+            )
+        )
+        series.append("Estimated")
+        colors.append(TOL_VIBRANT[5])
+        opacities.append(1.0)
+        widths.append(1.5)
+
+    combined = pd.concat(frames, ignore_index=True)
+    return (
+        alt.Chart(combined)
+        .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("speed_kmh:Q")
+            .title("Speed (km/h)")
+            .scale(domain=[0, 50], clamp=True),
+            color=alt.Color("series:N")
+            .scale(domain=series, range=colors)
+            .legend(LEGEND_BOTTOM),
+            opacity=alt.Opacity("series:N")
+            .scale(domain=series, range=opacities)
+            .legend(None),
+            strokeWidth=alt.StrokeWidth("series:N")
+            .scale(domain=series, range=widths)
+            .legend(None),
+        )
+    )
+
+
 def speed_comparison(
     ride_df: pd.DataFrame,
     result_df: pd.DataFrame,
     ref_df: pd.DataFrame | None = None,
 ) -> alt.Chart:
-    """Actual vs estimated speed with legend and optional reference line.
+    """Effective speed (remaining_dist / TTG) vs reference estimators.
 
     Parameters
     ----------
@@ -226,14 +387,19 @@ def speed_comparison(
         only actual and estimated lines are drawn.
     """
     est_df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
+    smoothed_actual = ride_df[["elapsed_min"]].assign(
+        speed_kmh=ride_df["speed_kmh"].rolling(60, min_periods=1, center=True).mean(),
+        series="Actual (60s mean)",
+    )
     frames = [
         ride_df[["elapsed_min", "speed_kmh"]].assign(series="Actual"),
+        smoothed_actual,
         est_df[["elapsed_min", "speed_kmh"]].assign(series="Estimated"),
     ]
-    series = ["Actual", "Estimated"]
-    colors = ["#888", TOL_VIBRANT[5]]
-    opacities = [0.4, 1.0]
-    widths = [0.6, 1.5]
+    series = ["Actual", "Actual (60s mean)", "Estimated"]
+    colors = ["#888", "#555", TOL_VIBRANT[5]]
+    opacities = [0.2, 0.7, 1.0]
+    widths = [0.5, 1.2, 1.5]
 
     if ref_df is not None:
         ref_speed = ref_df.assign(speed_kmh=ref_df["speed_ms"] * 3.6)
@@ -252,11 +418,11 @@ def speed_comparison(
         .encode(
             x=X_ELAPSED,
             y=alt.Y("speed_kmh:Q")
-            .title("Speed (km/h)")
+            .title("Effective speed (km/h)")
             .scale(domain=[0, 40], clamp=True),
             color=alt.Color("series:N")
             .scale(domain=series, range=colors)
-            .legend(alt.Legend(title=None, orient="top-right")),
+            .legend(LEGEND_BOTTOM),
             opacity=alt.Opacity("series:N")
             .scale(domain=series, range=opacities)
             .legend(None),
@@ -270,12 +436,12 @@ def speed_comparison(
     total_avg_kmh = (
         (ride_df["distance_m"].iloc[-1] / total_s) * 3.6 if total_s > 0 else 0.0
     )
-    ref = (
+    ref_line = (
         alt.Chart(pd.DataFrame({"y": [total_avg_kmh]}))
         .mark_rule(color=TOL_BRIGHT[1], strokeWidth=1.2, strokeDash=[6, 3])
         .encode(y="y:Q")
     )
-    return lines + ref
+    return lines + ref_line
 
 
 def comparison_errors(
