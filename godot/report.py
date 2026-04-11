@@ -106,16 +106,18 @@ def write_html_report(
     display_df = results_df.rename(columns=rename_map)
 
     # --- Global averages ---
-    global_data: dict[str, pd.Series] = {}
-    for m in selected_metrics:
-        meta = _METRIC_META[m]
-        cols = metric_groups[m]
-        global_data[meta["label"]] = (
-            results_df[cols]
-            .mean()
-            .rename(lambda c, s=meta["suffix"]: col_to_name[c[: -len(s)]])
-        )
-    global_avg = pd.DataFrame(global_data)
+    # Pivot: one row per estimator, one column per metric
+    est_keys = sorted(col_to_name.keys())
+    global_rows = []
+    for ek in est_keys:
+        row: dict[str, object] = {"Estimator": col_to_name[ek]}
+        for m in selected_metrics:
+            meta = _METRIC_META[m]
+            col = ek + meta["suffix"]
+            if col in results_df.columns:
+                row[meta["label"]] = results_df[col].mean()
+        global_rows.append(row)
+    global_avg = pd.DataFrame(global_rows).set_index("Estimator")
     sort_col = "MAE" if "mae" in selected_metrics else global_avg.columns[0]
     global_avg = global_avg.sort_values(sort_col)
 
@@ -163,7 +165,9 @@ def write_html_report(
     global_styler = global_avg.style
     for m in selected_metrics:
         label = _METRIC_META[m]["label"]
-        fn = _highlight_min_abs if m == "mpe" else _highlight_min
+        if label not in global_avg.columns:
+            continue
+        fn = _highlight_min_abs if "mpe" in m else _highlight_min
         global_styler = global_styler.apply(fn, axis=0, subset=[label])
     global_html = (
         global_styler.format(global_fmt)
