@@ -6,7 +6,7 @@ from godot.estimators import (
     BaseEstimator,
     RollingAvgSpeedEstimator,
 )
-from godot.pause import AddElapsed, NanPauses, NoPause, SubtractElapsed
+from godot.pause import AddElapsed, NanPauses, NoPause, WallClockPause
 from godot.fit import read_fit
 from godot.gpx import (
     read_gpx,
@@ -42,7 +42,7 @@ __all__ = [
     "AddElapsed",
     "NanPauses",
     "NoPause",
-    "SubtractElapsed",
+    "WallClockPause",
     # benchmark
     "backtest",
     "compute_metrics",

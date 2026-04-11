@@ -94,11 +94,12 @@ def _elapsed_pause(ride: Ride) -> pd.Series:
     return df.groupby(run_id)["delta_time"].cumsum() * df["paused"]
 
 
-class SubtractElapsed(NanPauses):
-    """NaN speed + subtract elapsed pause from forward-filled ETA.
+class WallClockPause(NanPauses):
+    """ETA follows the wall clock during pauses.
 
-    Makes ETA decrease at 1 s/s during a pause (matching ATA),
-    keeping the error flat.
+    Freezes the moving-time estimate and lets the clock tick: ETA
+    decreases at 1 s/s during a pause (matching ATA), keeping the
+    error flat. Once the pause ends, the prior resumes normally.
     """
 
     def fill_pauses(self, eta: pd.Series, ride: Ride) -> pd.Series:
