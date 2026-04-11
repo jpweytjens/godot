@@ -79,20 +79,32 @@ def write_html_report(
         Where to write the HTML file.
     """
     # --- Discover estimator names from columns ---
-    all_names = {
-        c[: -len(s)]
-        for m in _METRIC_META.values()
-        for s in [m["suffix"]]
-        for c in results_df.columns
-        if c.endswith(s)
-    }
+    # Match longest suffix first to avoid e.g. _mae matching _mov_mae columns
+    suffixes = sorted(
+        [m["suffix"] for m in _METRIC_META.values()], key=len, reverse=True
+    )
+    all_names: set[str] = set()
+    for c in results_df.columns:
+        for s in suffixes:
+            if c.endswith(s):
+                all_names.add(c[: -len(s)])
+                break
     col_to_name = {k: k.replace("_", " ").title() for k in all_names}
 
     # --- Select and order columns ---
-    metric_groups: dict[str, list[str]] = {}
-    for m in selected_metrics:
+    # Assign each column to the metric with the longest matching suffix
+    # to avoid e.g. _mae claiming _mov_mae columns
+    selected_by_len = sorted(
+        selected_metrics, key=lambda m: len(_METRIC_META[m]["suffix"]), reverse=True
+    )
+    metric_groups: dict[str, list[str]] = {m: [] for m in selected_metrics}
+    claimed: set[str] = set()
+    for m in selected_by_len:
         suffix = _METRIC_META[m]["suffix"]
-        metric_groups[m] = [c for c in results_df.columns if c.endswith(suffix)]
+        for c in results_df.columns:
+            if c.endswith(suffix) and c not in claimed:
+                metric_groups[m].append(c)
+                claimed.add(c)
     metric_cols = [c for m in selected_metrics for c in metric_groups[m]]
     results_df = results_df[_INFO_COLS + metric_cols]
 
