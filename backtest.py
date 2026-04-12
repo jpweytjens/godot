@@ -13,6 +13,7 @@ from godot.estimators import (
     AvgSpeedEstimator,
     AdaptiveGradientPriorEstimator,
     BinnedAdaptiveEstimator,
+    OracleTrustedBinnedEstimator,
     TrustedBinnedAdaptiveEstimator,
     WeightedGainVFlat,
     NoisyOracleAdaptiveLerpEstimator,
@@ -192,6 +193,24 @@ ESTIMATORS = {
     ),
     "Trusted binned physics": (
         TrustedBinnedAdaptiveEstimator(
+            prior=PhysicsGradientPriorEstimator(
+                mass_kg=TOTAL_SYSTEM_MASS,
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ),
+        ),
+        WallClockPause(),
+    ),
+    "Oracle trusted binned empirical": (
+        OracleTrustedBinnedEstimator(
+            prior=GradientPriorEstimator(
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+                ratios=GRADIENT_RATIOS,
+            ),
+        ),
+        NoPause(),
+    ),
+    "Oracle trusted binned physics": (
+        OracleTrustedBinnedEstimator(
             prior=PhysicsGradientPriorEstimator(
                 mass_kg=TOTAL_SYSTEM_MASS,
                 v_flat_kmh=GLOBAL_PRIOR_KMH,

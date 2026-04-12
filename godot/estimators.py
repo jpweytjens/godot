@@ -2006,6 +2006,48 @@ class TrustedBinnedAdaptiveEstimator(BinnedAdaptiveEstimator):
         return slow, fast
 
 
+class OracleTrustedBinnedEstimator(TrustedBinnedAdaptiveEstimator):
+    """Trusted binned estimator with oracle (perfect) v_flat.
+
+    Before each prediction, computes the true flat-section average speed
+    from the full ride and patches the prior's v_flat. This isolates the
+    slow/fast EWMA correction performance from v_flat estimation error.
+
+    Parameters
+    ----------
+    max_grad : float
+        Max |gradient| (fraction) to consider flat for the oracle.
+        Default 0.02.
+    **kwargs
+        Forwarded to `TrustedBinnedAdaptiveEstimator`.
+    """
+
+    def __init__(self, max_grad: float = 0.02, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._oracle_max_grad = max_grad
+
+    def _set_oracle_vflat(self, ride: Ride) -> None:
+        df = ride.df
+        moving = ~df["paused"]
+        gradients, _ = _row_gradients(ride)
+        flat_mask = moving & (gradients.abs() < self._oracle_max_grad)
+        flat_dist = df.loc[flat_mask, "delta_distance"].sum()
+        flat_time = df.loc[flat_mask, "delta_time"].sum()
+        if flat_time > 0:
+            self._prior._v_flat_ms = flat_dist / flat_time
+
+    def predict(self, ride: Ride) -> pd.Series:
+        self._set_oracle_vflat(ride)
+        return super().predict(ride)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        self._set_oracle_vflat(ride)
+        return super().predict_current(ride)
+
+    def __str__(self) -> str:
+        return f"oracle {super().__str__()}"
+
+
 class PriorDEWMASpeedEstimator(BaseEstimator):
     """Double EWMA speed estimator seeded with a prior.
 
