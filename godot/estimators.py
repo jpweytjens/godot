@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import bisect
 import math
+from collections import deque
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -791,6 +793,52 @@ class StaticVFlat(VFlatEstimator):
         return "static"
 
 
+class FlatSpeedVFlat(VFlatEstimator):
+    """Cumulative average moving speed on flat sections.
+
+    Uses only rows where ``|gradient| < max_grad`` and the rider is
+    moving. Returns the expanding mean of instantaneous speed on those
+    rows, forward-filled for non-flat rows. Falls back to
+    ``v_flat_init_ms`` until the first flat observation.
+
+    Parameters
+    ----------
+    max_grad : float, optional
+        Maximum absolute gradient (fraction) to consider flat.
+        Default 0.02 (2%).
+    """
+
+    def __init__(self, max_grad: float = 0.02) -> None:
+        self._max_grad = max_grad
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        moving = ~df["paused"]
+        gradients, _ = _row_gradients(ride)
+
+        flat_moving = moving & (gradients.abs() < self._max_grad)
+        speed = self.safe_divide(df["delta_distance"], df["delta_time"])
+        flat_speed = speed.where(flat_moving)
+
+        # Cumulative mean of flat-only speed, forward-filled
+        cum_sum = flat_speed.cumsum()
+        cum_count = flat_moving.cumsum()
+        v_flat = self.safe_divide(cum_sum, cum_count).ffill().fillna(v_flat_init_ms)
+
+        return v_flat
+
+    def __str__(self) -> str:
+        return f"flat-speed(|g|<{self._max_grad * 100:.0f}%)"
+
+    def __repr__(self) -> str:
+        return f"FlatSpeedVFlat(max_grad={self._max_grad!r})"
+
+
 class WeightedGainVFlat(VFlatEstimator):
     """Adaptive v_flat using gradient-weighted gain schedule.
 
@@ -869,6 +917,232 @@ class WeightedGainVFlat(VFlatEstimator):
         return (
             f"WeightedGainVFlat(tau_s={self._tau_s!r}, "
             f"lambda_slow={self._lambda_slow!r})"
+        )
+
+
+class EwmaLockVFlat(VFlatEstimator):
+    """Flat-only EWMA with stability lock.
+
+    Runs an EWMA on flat-section speeds and locks v_flat once the
+    estimate stabilises. After locking, v_flat is frozen for the
+    remainder of the ride — all subsequent drift is left to the
+    slow/fast EWMA corrections.
+
+    Parameters
+    ----------
+    max_grad : float
+        Max |gradient| (fraction) to consider flat. Default 0.02.
+    ewma_span_s : float
+        EWMA span in seconds. Default 60.
+    min_flat_s : float
+        Min cumulative flat moving seconds before lock check. Default 60.
+    stability_window_s : float
+        Look-back window (flat seconds) for stability check. Default 60.
+    lock_threshold_kmh : float
+        Max EWMA drift (km/h) to declare stable and lock. Default 1.0.
+    """
+
+    def __init__(
+        self,
+        max_grad: float = 0.02,
+        ewma_span_s: float = 60.0,
+        min_flat_s: float = 60.0,
+        stability_window_s: float = 60.0,
+        lock_threshold_kmh: float = 1.0,
+    ) -> None:
+        self._max_grad = max_grad
+        self._ewma_span_s = ewma_span_s
+        self._min_flat_s = min_flat_s
+        self._stability_window_s = stability_window_s
+        self._lock_threshold_ms = lock_threshold_kmh / 3.6
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        moving = ~df["paused"]
+        gradients, _ = _row_gradients(ride)
+        speed = self.safe_divide(df["delta_distance"], df["delta_time"]).values
+        grad_vals = gradients.abs().values
+
+        alpha = 2.0 / (self._ewma_span_s + 1.0)
+        ewma = np.nan
+        flat_cum_s = 0.0
+        locked_value = np.nan
+        # Ring buffer: (flat_cumtime_s, ewma_value)
+        history: deque[tuple[float, float]] = deque()
+
+        out = np.empty(len(df))
+        dt = df["delta_time"].values
+
+        for i in range(len(df)):
+            if not np.isnan(locked_value):
+                out[i] = locked_value
+                continue
+
+            is_flat_moving = (
+                moving.iloc[i]
+                and grad_vals[i] < self._max_grad
+                and not np.isnan(speed[i])
+                and speed[i] > 0
+            )
+
+            if is_flat_moving:
+                flat_cum_s += dt[i]
+                if np.isnan(ewma):
+                    ewma = speed[i]
+                else:
+                    ewma += alpha * (speed[i] - ewma)
+
+                history.append((flat_cum_s, ewma))
+
+                # Stability check
+                if flat_cum_s >= self._min_flat_s:
+                    cutoff = flat_cum_s - self._stability_window_s
+                    # Trim old entries beyond the window
+                    while len(history) > 1 and history[0][0] < cutoff:
+                        history.popleft()
+                    if history[0][0] <= cutoff + 1.0:
+                        old_ewma = history[0][1]
+                        if abs(ewma - old_ewma) < self._lock_threshold_ms:
+                            locked_value = ewma
+
+            out[i] = ewma if not np.isnan(ewma) else v_flat_init_ms
+
+        # Forward-fill through gaps where ewma was NaN (non-flat before first flat)
+        result = pd.Series(out, index=df.index)
+        return result
+
+    def __str__(self) -> str:
+        th = self._lock_threshold_ms * 3.6
+        return f"ewma-lock(span={self._ewma_span_s:.0f}s, lock={th:.1f}kmh)"
+
+    def __repr__(self) -> str:
+        th = self._lock_threshold_ms * 3.6
+        return (
+            f"EwmaLockVFlat(max_grad={self._max_grad!r}, "
+            f"ewma_span_s={self._ewma_span_s!r}, "
+            f"min_flat_s={self._min_flat_s!r}, "
+            f"stability_window_s={self._stability_window_s!r}, "
+            f"lock_threshold_kmh={th!r})"
+        )
+
+
+class MedianLockVFlat(VFlatEstimator):
+    """Expanding median of back-derived v_flat with stability lock.
+
+    Back-derives ``v_flat_obs = v_actual / ratio[gradient]`` from every
+    moving observation and tracks the expanding median. Locks once the
+    median stabilises.
+
+    The median naturally filters outlier v_flat derivations from steep
+    gradients where the physics ratio is imprecise.
+
+    Parameters
+    ----------
+    min_obs : int
+        Min observations before lock check. Default 60.
+    stability_window_obs : int
+        Compare current median to snapshot this many observations ago.
+        Default 60.
+    lock_threshold_kmh : float
+        Max median drift (km/h) to declare stable and lock. Default 1.0.
+    """
+
+    def __init__(
+        self,
+        min_obs: int = 60,
+        stability_window_obs: int = 60,
+        lock_threshold_kmh: float = 1.0,
+    ) -> None:
+        self._min_obs = min_obs
+        self._stability_window_obs = stability_window_obs
+        self._lock_threshold_ms = lock_threshold_kmh / 3.6
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        moving = ~df["paused"]
+        gradients, _ = _row_gradients(ride)
+
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(ratios)
+        max_bin = max(ratios)
+        row_ratios = np.array(
+            [ratios.get(max(min_bin, min(max_bin, g)), 1.0) for g in grad_pct]
+        )
+
+        actual_speed = self.safe_divide(df["delta_distance"], df["delta_time"]).values
+
+        sorted_obs: list[float] = []
+        obs_count = 0
+        locked_value = np.nan
+        last_snapshot_median = np.nan
+        last_snapshot_count = 0
+        current_median = np.nan
+
+        out = np.empty(len(df))
+
+        for i in range(len(df)):
+            if not np.isnan(locked_value):
+                out[i] = locked_value
+                continue
+
+            if (
+                moving.iloc[i]
+                and not np.isnan(actual_speed[i])
+                and actual_speed[i] > 0
+                and row_ratios[i] > 0
+            ):
+                v_flat_obs = actual_speed[i] / row_ratios[i]
+                if np.isfinite(v_flat_obs) and v_flat_obs > 0:
+                    bisect.insort(sorted_obs, v_flat_obs)
+                    obs_count += 1
+                    n = len(sorted_obs)
+                    current_median = (
+                        sorted_obs[n // 2]
+                        if n % 2 == 1
+                        else (sorted_obs[n // 2 - 1] + sorted_obs[n // 2]) / 2.0
+                    )
+
+                    # Take snapshot every stability_window_obs observations
+                    if obs_count == self._min_obs:
+                        last_snapshot_median = current_median
+                        last_snapshot_count = obs_count
+                    elif (
+                        obs_count > self._min_obs
+                        and (obs_count - last_snapshot_count)
+                        >= self._stability_window_obs
+                    ):
+                        if (
+                            abs(current_median - last_snapshot_median)
+                            < self._lock_threshold_ms
+                        ):
+                            locked_value = current_median
+                        last_snapshot_median = current_median
+                        last_snapshot_count = obs_count
+
+            out[i] = current_median if not np.isnan(current_median) else v_flat_init_ms
+
+        return pd.Series(out, index=df.index)
+
+    def __str__(self) -> str:
+        th = self._lock_threshold_ms * 3.6
+        return f"median-lock(min={self._min_obs}, lock={th:.1f}kmh)"
+
+    def __repr__(self) -> str:
+        th = self._lock_threshold_ms * 3.6
+        return (
+            f"MedianLockVFlat(min_obs={self._min_obs!r}, "
+            f"stability_window_obs={self._stability_window_obs!r}, "
+            f"lock_threshold_kmh={th!r})"
         )
 
 
