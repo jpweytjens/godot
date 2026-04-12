@@ -23,21 +23,20 @@ from godot.estimators import (
 )
 from godot.pause import NoPause, WallClockPause
 from godot.plot import (
+    X_ELAPSED,
+    _end_labels,
     _pause_intervals,
     avg_speed_overview,
     comparison_errors,
     downsample_for_plot,
     error_pct_refs,
     error_refs,
-    eta_error,
-    eta_error_moving,
-    eta_error_moving_pct,
-    eta_error_pct,
     pause_bands,
     prep_time_axis,
     speed_residual_raw,
     speed_residual_smoothed,
 )
+from godot.theme import TOL_VIBRANT
 from godot.ride import load_ride
 from godot.theme import TOL_BRIGHT
 
@@ -244,48 +243,122 @@ def run(
             )
             is_ref = name in (REF_TOTAL, REF_MOVING)
 
-            # Select error functions based on time basis
+            # Select delta columns based on time basis
             is_moving = _time_basis(name) == "M"
-            err_fn = eta_error_moving if is_moving else eta_error
-            err_pct_fn = eta_error_moving_pct if is_moving else eta_error_pct
+            delta_col = "delta_moving_s" if is_moving else "delta_s"
+            ata_col = "ata_moving_s" if is_moving else "ata_remaining_s"
+            err_title = (
+                "ETA \u2212 moving ATA (min)" if is_moving else "ETA \u2212 ATA (min)"
+            )
+            pct_title = "Moving ETA error (%)" if is_moving else "ETA error (%)"
 
-            # Reference layers (behind the estimator line)
-            ref_error: list[alt.Chart] = []
-            ref_pct: list[alt.Chart] = []
-            if not is_ref:
-                for ref_prep, color in [
-                    (ref_total_prepped, REF_TOTAL_COLOR),
-                    (ref_moving_prepped, REF_MOVING_COLOR),
-                ]:
-                    if ref_prep is not None:
-                        ref_error.append(
-                            err_fn(
-                                ref_prep,
-                                color=color,
-                                opacity=REF_OPACITY,
-                                stroke_width=1.0,
+            # Build combined error DataFrames with series column
+            def _build_error_frames(delta_c, ata_c):
+                frames_min = []
+                frames_pct = []
+                series = []
+                colors = []
+                opacities = []
+                widths = []
+                if not is_ref:
+                    for ref_prep, ref_color, ref_name in [
+                        (ref_total_prepped, REF_TOTAL_COLOR, "Avg total"),
+                        (ref_moving_prepped, REF_MOVING_COLOR, "Avg moving"),
+                    ]:
+                        if ref_prep is not None:
+                            frames_min.append(
+                                ref_prep[["elapsed_min"]].assign(
+                                    value=ref_prep[delta_c] / 60,
+                                    series=ref_name,
+                                )
                             )
-                        )
-                        ref_pct.append(
-                            err_pct_fn(
-                                ref_prep,
-                                color=color,
-                                opacity=REF_OPACITY,
-                                stroke_width=1.0,
+                            ata = ref_prep[ata_c]
+                            pct = (ref_prep[delta_c] / ata).where(ata > 0) * 100
+                            frames_pct.append(
+                                ref_prep[["elapsed_min"]].assign(
+                                    value=pct,
+                                    series=ref_name,
+                                )
                             )
-                        )
+                            series.append(ref_name)
+                            colors.append(ref_color)
+                            opacities.append(REF_OPACITY)
+                            widths.append(1.0)
+                # Main estimator
+                frames_min.append(
+                    result_prepped[["elapsed_min"]].assign(
+                        value=result_prepped[delta_c] / 60,
+                        series="Estimator",
+                    )
+                )
+                ata = result_prepped[ata_c]
+                pct = (result_prepped[delta_c] / ata).where(ata > 0) * 100
+                frames_pct.append(
+                    result_prepped[["elapsed_min"]].assign(
+                        value=pct,
+                        series="Estimator",
+                    )
+                )
+                series.append("Estimator")
+                colors.append(TOL_VIBRANT[5])
+                opacities.append(1.0)
+                widths.append(1.5)
+                return frames_min, frames_pct, series, colors, opacities, widths
+
+            (
+                err_frames,
+                pct_frames,
+                err_series,
+                err_colors,
+                err_opacities,
+                err_widths,
+            ) = _build_error_frames(delta_col, ata_col)
+
+            def _encoded_chart(frames, y_title, series, colors, opacities, widths):
+                combined = pd.concat(frames, ignore_index=True)
+                lines = (
+                    alt.Chart(combined)
+                    .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
+                    .encode(
+                        x=X_ELAPSED,
+                        y=alt.Y("value:Q").title(y_title),
+                        color=alt.Color("series:N")
+                        .scale(domain=series, range=colors)
+                        .legend(None),
+                        opacity=alt.Opacity("series:N")
+                        .scale(domain=series, range=opacities)
+                        .legend(None),
+                        strokeWidth=alt.StrokeWidth("series:N")
+                        .scale(domain=series, range=widths)
+                        .legend(None),
+                    )
+                )
+                labels = _end_labels(combined, "value", series, colors)
+                return lines + labels
 
             error_chart = alt.layer(
                 pause_bands(ride_prepped, pause_df=pause_df),
-                *ref_error,
-                err_fn(result_prepped),
+                _encoded_chart(
+                    err_frames,
+                    err_title,
+                    err_series,
+                    err_colors,
+                    err_opacities,
+                    err_widths,
+                ),
                 error_refs(),
             ).properties(width=chart_width, height=chart_height)
 
             error_pct_chart = alt.layer(
                 pause_bands(ride_prepped, pause_df=pause_df),
-                *ref_pct,
-                err_pct_fn(result_prepped),
+                _encoded_chart(
+                    pct_frames,
+                    pct_title,
+                    err_series,
+                    err_colors,
+                    err_opacities,
+                    err_widths,
+                ),
                 error_pct_refs(),
             ).properties(width=chart_width, height=chart_height)
 

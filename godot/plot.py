@@ -85,6 +85,37 @@ def downsample_for_plot(df: pd.DataFrame, freq: str = "5s") -> pd.DataFrame:
 X_ELAPSED = alt.X("elapsed_min:Q").title("Elapsed time (min)")
 
 
+def _end_labels(
+    combined: pd.DataFrame,
+    y_col: str,
+    series: list[str],
+    colors: list[str],
+) -> alt.Chart:
+    """Text labels at the rightmost point of each series."""
+    endpoints = []
+    for s, c in zip(series, colors):
+        sub = combined[combined["series"] == s].dropna(subset=[y_col])
+        if sub.empty:
+            continue
+        last = sub.iloc[-1]
+        endpoints.append(
+            {"elapsed_min": last["elapsed_min"], y_col: last[y_col], "series": s}
+        )
+    if not endpoints:
+        return alt.Chart(pd.DataFrame()).mark_text()
+    ep_df = pd.DataFrame(endpoints)
+    return (
+        alt.Chart(ep_df)
+        .mark_text(align="left", dx=4, fontSize=9)
+        .encode(
+            x="elapsed_min:Q",
+            y=f"{y_col}:Q",
+            text="series:N",
+            color=alt.Color("series:N").scale(domain=series, range=colors).legend(None),
+        )
+    )
+
+
 def pause_bands(
     df: pd.DataFrame,
     min_pause_s: float = 10.0,
@@ -360,15 +391,13 @@ def avg_speed_overview(
         dashes.append([1, 0])
 
     combined = pd.concat(frames, ignore_index=True)
-    return (
+    lines = (
         alt.Chart(combined)
         .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
         .encode(
             x=X_ELAPSED,
             y=alt.Y("speed_kmh:Q").title("Speed (km/h)").scale(zero=True),
-            color=alt.Color("series:N")
-            .scale(domain=series, range=colors)
-            .legend(LEGEND_BOTTOM),
+            color=alt.Color("series:N").scale(domain=series, range=colors).legend(None),
             strokeWidth=alt.StrokeWidth("series:N")
             .scale(domain=series, range=widths)
             .legend(None),
@@ -377,6 +406,8 @@ def avg_speed_overview(
             .legend(None),
         )
     )
+    labels = _end_labels(combined, "speed_kmh", series, colors)
+    return lines + labels
 
 
 def actual_speed(
