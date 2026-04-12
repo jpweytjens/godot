@@ -376,9 +376,9 @@ if __name__ == "__main__":
 
     if args.metrics is None:
         args.metrics = (
-            ["mpe", "mape", "mov_mpe", "mov_mape"]
+            ["rmse", "mpe", "mape", "mov_mpe", "mov_mape"]
             if args.no_plots
-            else ["mae", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"]
+            else ["mae", "rmse", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"]
         )
 
     paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
