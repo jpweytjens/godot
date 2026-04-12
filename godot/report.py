@@ -184,9 +184,19 @@ def write_html_report(
 
     global_avg = pd.DataFrame(global_rows).set_index("Metric")
 
+    # Rows whose metric name contains "MPE" but not "MAPE" are signed
+    _signed_labels = {
+        f"{_METRIC_META[m]['label']}"
+        for m in selected_metrics
+        if "mpe" in m and "mape" not in m
+    }
+
     def _highlight_global(s: pd.Series) -> list[str]:
         if "(wins)" in s.name:
             return _highlight_max(s)
+        label = s.name.rsplit(" (", 1)[0]
+        if label in _signed_labels:
+            return _highlight_min_abs(s)
         return _highlight_min(s)
 
     global_html = (

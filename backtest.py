@@ -11,7 +11,10 @@ from godot.estimators import (
     AdaptiveLerpSpeedEstimator,
     AdaptivePhysicsEstimator,
     AvgSpeedEstimator,
-    BinnedAdaptivePhysicsEstimator,
+    AdaptiveGradientPriorEstimator,
+    BinnedAdaptiveEstimator,
+    TrustedBinnedAdaptiveEstimator,
+    WeightedGainVFlat,
     NoisyOracleAdaptiveLerpEstimator,
     OracleAdaptiveLerpEstimator,
     GradientPriorEstimator,
@@ -44,6 +47,7 @@ REF_OPACITY = 0.7
 _ratio_df = pd.read_parquet(Path("data/gradient_ratios.parquet"))
 GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
 GLOBAL_PRIOR_KMH = 28.8  # tunable flat-ground speed
+TOTAL_SYSTEM_MASS = 85 + 10  # rider + bike, for physics-based estimators
 
 ESTIMATORS = {
     "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), WallClockPause()),
@@ -130,14 +134,14 @@ ESTIMATORS = {
     ),
     "Physics gradient prior": (
         PhysicsGradientPriorEstimator(
-            mass_kg=80,
+            mass_kg=TOTAL_SYSTEM_MASS,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),
         WallClockPause(),
     ),
     "Adaptive physics (flat cal)": (
         AdaptivePhysicsEstimator(
-            mass_kg=80,
+            mass_kg=TOTAL_SYSTEM_MASS,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
             cal_max_grad=0.02,
         ),
@@ -152,9 +156,46 @@ ESTIMATORS = {
     #     WallClockPause(),
     # ),
     "Binned adaptive physics": (
-        BinnedAdaptivePhysicsEstimator(
-            mass_kg=80,
+        BinnedAdaptiveEstimator(
+            prior=PhysicsGradientPriorEstimator(
+                mass_kg=TOTAL_SYSTEM_MASS,
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ),
+        ),
+        WallClockPause(),
+    ),
+    "Binned adaptive empirical": (
+        BinnedAdaptiveEstimator(
+            prior=GradientPriorEstimator(
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+                ratios=GRADIENT_RATIOS,
+            ),
+        ),
+        NoPause(),
+    ),
+    "Trusted binned empirical": (
+        TrustedBinnedAdaptiveEstimator(
+            prior=GradientPriorEstimator(
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+                ratios=GRADIENT_RATIOS,
+            ),
+        ),
+        NoPause(),
+    ),
+    "Adaptive v_flat empirical": (
+        AdaptiveGradientPriorEstimator(
             v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ratios=GRADIENT_RATIOS,
+            vflat_estimator=WeightedGainVFlat(),
+        ),
+        NoPause(),
+    ),
+    "Trusted binned physics": (
+        TrustedBinnedAdaptiveEstimator(
+            prior=PhysicsGradientPriorEstimator(
+                mass_kg=TOTAL_SYSTEM_MASS,
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ),
         ),
         WallClockPause(),
     ),

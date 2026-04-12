@@ -728,6 +728,260 @@ class PriorEWMASpeedEstimator(BaseEstimator):
         return speed.ewm(**ewm_kwargs).mean()
 
 
+# ---------------------------------------------------------------------------
+# v_flat estimators — estimate flat-ground speed from observed ride data
+# ---------------------------------------------------------------------------
+
+
+class VFlatEstimator:
+    """Base class for flat-ground speed estimators.
+
+    Subclasses implement `estimate` which returns a per-row v_flat series
+    (m/s) given a ride and a set of gradient speed ratios.
+    """
+
+    @staticmethod
+    def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+        """Element-wise division, returning NaN where either operand is zero."""
+        return (numerator / denominator).where((denominator != 0) & (numerator != 0))
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        """Return estimated v_flat (m/s) at each row.
+
+        Parameters
+        ----------
+        ride : Ride
+            Prepared ride from `load_ride`.
+        ratios : dict[int, float]
+            Gradient bin (%) → speed ratio relative to flat.
+        v_flat_init_ms : float
+            Initial v_flat guess (m/s).
+
+        Returns
+        -------
+        pd.Series
+            v_flat estimate (m/s) at each row.
+        """
+        raise NotImplementedError
+
+    def __str__(self) -> str:
+        return self.__class__.__name__
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}()"
+
+
+class StaticVFlat(VFlatEstimator):
+    """Returns the initial v_flat unchanged for every row."""
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        return pd.Series(v_flat_init_ms, index=ride.df.index)
+
+    def __str__(self) -> str:
+        return "static"
+
+
+class WeightedGainVFlat(VFlatEstimator):
+    """Adaptive v_flat using gradient-weighted gain schedule.
+
+    Back-derives v_flat from each observation using the empirical speed
+    ratios: ``v_flat_obs = v_actual / ratio[gradient]``. Updates via a
+    weighted gain schedule that converges fast (Welford-like) then
+    floors to a slow EWMA for drift tracking.
+
+    Observations are weighted by ``cos²(θ) * min(dt, τ) / τ``, which
+    downweights steep gradients (noisy ratio lookup) and very short
+    time steps (unreliable speed).
+
+    Parameters
+    ----------
+    tau_s : float, optional
+        Segment duration saturation (seconds). Default 30.
+    lambda_slow : float, optional
+        Minimum gain floor for long-term drift tracking. Default 0.002.
+    """
+
+    def __init__(self, tau_s: float = 30.0, lambda_slow: float = 0.002) -> None:
+        self._tau_s = tau_s
+        self._lambda_slow = lambda_slow
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        moving = ~df["paused"]
+        gradients, _ = _row_gradients(ride)
+
+        # Precompute per-row ratio from the ratio table
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(ratios)
+        max_bin = max(ratios)
+        row_ratios = np.array(
+            [ratios.get(max(min_bin, min(max_bin, g)), 1.0) for g in grad_pct]
+        )
+
+        actual_speed = self.safe_divide(df["delta_distance"], df["delta_time"]).values
+        dt = df["delta_time"].values
+
+        v_flat = v_flat_init_ms
+        W = 0.0
+        out = np.empty(len(df))
+
+        for i in range(len(df)):
+            if not moving.iloc[i] or np.isnan(actual_speed[i]) or row_ratios[i] <= 0:
+                out[i] = v_flat
+                continue
+
+            v_flat_obs = actual_speed[i] / row_ratios[i]
+            if v_flat_obs <= 0 or not np.isfinite(v_flat_obs):
+                out[i] = v_flat
+                continue
+
+            theta = math.atan(gradients.iloc[i])
+            w = math.cos(theta) ** 2 * min(dt[i], self._tau_s) / self._tau_s
+
+            W += w
+            gain = max(w / W, self._lambda_slow)
+            v_flat += gain * (v_flat_obs - v_flat)
+            v_flat = max(v_flat, 2.0)  # floor ~7 km/h
+
+            out[i] = v_flat
+
+        return pd.Series(out, index=df.index)
+
+    def __str__(self) -> str:
+        return f"weighted-gain(τ={self._tau_s:.0f}s, λ={self._lambda_slow})"
+
+    def __repr__(self) -> str:
+        return (
+            f"WeightedGainVFlat(tau_s={self._tau_s!r}, "
+            f"lambda_slow={self._lambda_slow!r})"
+        )
+
+
+class AdaptiveGradientPriorEstimator(BaseEstimator):
+    """Gradient-aware ETA estimator with adaptive v_flat.
+
+    Like `GradientPriorEstimator` but v_flat is updated per row by a
+    `VFlatEstimator`. The per-row TTG sums
+    ``segment_distance / (v_flat[i] * ratio[bin])`` over remaining
+    segments, using the current v_flat estimate.
+
+    Parameters
+    ----------
+    v_flat_kmh : float
+        Initial flat-ground speed guess (km/h).
+    ratios : dict[int, float]
+        Gradient bin (%) → speed ratio relative to flat.
+    vflat_estimator : VFlatEstimator
+        Strategy for updating v_flat during the ride.
+    """
+
+    def __init__(
+        self,
+        v_flat_kmh: float,
+        ratios: dict[int, float],
+        vflat_estimator: VFlatEstimator,
+    ) -> None:
+        self._v_flat_init_ms = v_flat_kmh / 3.6
+        self._v_flat_ms = self._v_flat_init_ms  # compat with _ratio_for users
+        self._ratios = ratios
+        self._vflat_est = vflat_estimator
+
+    def __str__(self) -> str:
+        return (
+            f"adaptive gradient prior "
+            f"({self._v_flat_init_ms * 3.6:.1f} km/h init, "
+            f"vflat={self._vflat_est})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"AdaptiveGradientPriorEstimator("
+            f"v_flat_kmh={self._v_flat_init_ms * 3.6!r}, "
+            f"ratios=<{len(self._ratios)} bins>, "
+            f"vflat_estimator={self._vflat_est!r})"
+        )
+
+    def _ratio_for(self, gradient_frac: float) -> float:
+        bin_pct = math.floor(gradient_frac * 100)
+        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
+        return self._ratios.get(bin_pct, 1.0)
+
+    def predict(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        v_flat_series = self._vflat_est.estimate(
+            ride, self._ratios, self._v_flat_init_ms
+        )
+        v_flat_arr = v_flat_series.values
+
+        seg_starts = np.array([s.start_distance_m for s in segments])
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+
+        speeds = np.empty(len(distances))
+        for i in range(len(df)):
+            d = distances[i]
+            vf = v_flat_arr[i]
+
+            si = int(np.searchsorted(seg_ends, d, side="right"))
+            si = min(si, len(segments) - 1)
+
+            ttg = 0.0
+            for j in range(si, len(segments)):
+                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
+                s_len = seg_ends[j] - s_start
+                if s_len <= 0:
+                    continue
+                ttg += s_len / (vf * seg_ratios[j])
+
+            remaining = total_dist - d
+            if ttg > 0 and remaining > 0:
+                speeds[i] = remaining / ttg
+            else:
+                speeds[i] = np.nan
+
+        return pd.Series(speeds, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        v_flat_series = self._vflat_est.estimate(
+            ride, self._ratios, self._v_flat_init_ms
+        )
+
+        speed = np.array(
+            [
+                v_flat_series.iloc[i] * self._ratio_for(segments[idx[i]].gradient)
+                for i in range(len(df))
+            ]
+        )
+        return pd.Series(speed, index=df.index)
+
+
 class GradientPriorEstimator(BaseEstimator):
     """Static gradient-aware ETA estimator.
 
@@ -1146,20 +1400,22 @@ def _gradient_bin_pct(gradient_frac: pd.Series, bin_size: int = 1) -> pd.Series:
     return pct.astype(int)
 
 
-class BinnedAdaptivePhysicsEstimator(BaseEstimator):
-    """Physics gradient prior with slow v_flat EWMA and per-bin fast corrections.
+class BinnedAdaptiveEstimator(BaseEstimator):
+    """Gradient prior with slow v_flat EWMA and per-bin fast corrections.
 
-    Like `AdaptivePhysicsEstimator` but the fast EWMA runs per gradient
-    bin. Each bin independently learns a correction for its gradient, so a
-    climb-specific error doesn't contaminate descent predictions. Per-bin
-    corrections are applied to both `predict()` (TTG) and `predict_current()`.
+    Wraps any `GradientPriorEstimator` (empirical or physics-based) and
+    learns two correction layers on top:
+
+    - **slow**: v_flat correction with startup ramp (expanding mean →
+      EWMA handoff), optionally restricted to near-flat rows.
+    - **fast**: per-gradient-bin EWMA of the residual after slow
+      correction. Each bin independently learns a correction so a
+      climb-specific error doesn't contaminate descent predictions.
 
     Parameters
     ----------
-    mass_kg : float
-        Rider + bike mass (kg).
-    v_flat_kmh : float
-        Prior flat-ground speed (km/h).
+    prior : GradientPriorEstimator
+        Base gradient-aware estimator providing speed ratios and TTG.
     slow_span_s : float, optional
         Span for the slow calibration EWMA. Default 3600 (60 min).
     fast_span_s : float, optional
@@ -1171,26 +1427,18 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         Use 3 for coarser bins with more observations per bucket.
     cal_max_grad : float, optional
         Maximum |gradient| (fraction) for slow calibration. Default 0.02.
-    cda, crr, rho : float, optional
-        Physics model parameters.
     """
 
     def __init__(
         self,
-        mass_kg: float,
-        v_flat_kmh: float,
+        prior: GradientPriorEstimator,
         slow_span_s: float = 3600.0,
         fast_span_s: float = 300.0,
         ramp_s: float = 600.0,
         bin_size: int = 1,
         cal_max_grad: float = 0.02,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
     ) -> None:
-        self._physics = PhysicsGradientPriorEstimator(
-            mass_kg=mass_kg, v_flat_kmh=v_flat_kmh, cda=cda, crr=crr, rho=rho
-        )
+        self._prior = prior
         self._slow_span_s = slow_span_s
         self._fast_span_s = fast_span_s
         self._ramp_s = ramp_s
@@ -1204,14 +1452,14 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
             else "all"
         )
         return (
-            f"binned adaptive physics (slow={int(self._slow_span_s)}s [{cal}], "
+            f"binned adaptive (slow={int(self._slow_span_s)}s [{cal}], "
             f"fast={int(self._fast_span_s)}s/{self._bin_size}%bin, "
-            f"ramp={int(self._ramp_s)}s, {self._physics})"
+            f"ramp={int(self._ramp_s)}s, {self._prior})"
         )
 
     def __repr__(self) -> str:
         return (
-            f"BinnedAdaptivePhysicsEstimator(physics={self._physics!r}, "
+            f"BinnedAdaptiveEstimator(prior={self._prior!r}, "
             f"slow_span_s={self._slow_span_s!r}, fast_span_s={self._fast_span_s!r}, "
             f"ramp_s={self._ramp_s!r}, bin_size={self._bin_size!r}, "
             f"cal_max_grad={self._cal_max_grad!r})"
@@ -1225,7 +1473,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         actual = self.safe_divide(df["delta_distance"], df["delta_time"])
         actual = actual.where(moving)
 
-        predicted = self._physics.predict_current(ride)
+        predicted = self._prior.predict_current(ride)
         ratio = self.safe_divide(actual, predicted)
 
         gradients, _ = _row_gradients(ride)
@@ -1254,7 +1502,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         slow, fast = self._corrections(ride)
         gradients, segments = _row_gradients(ride)
         df = ride.df
-        v_flat = self._physics._v_flat_ms
+        v_flat = self._prior._v_flat_ms
         grad_bins = _gradient_bin_pct(gradients, self._bin_size)
         bs = self._bin_size
 
@@ -1262,7 +1510,7 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
         distances = df["distance_m"].values
 
         seg_base_speeds = np.array(
-            [v_flat * self._physics._ratio_for(s.gradient) for s in segments]
+            [v_flat * self._prior._ratio_for(s.gradient) for s in segments]
         )
         seg_bins = np.array(
             [int(np.floor(s.gradient * 100 / bs) * bs) for s in segments]
@@ -1307,8 +1555,141 @@ class BinnedAdaptivePhysicsEstimator(BaseEstimator):
 
     def predict_current(self, ride: Ride) -> pd.Series:
         slow, fast = self._corrections(ride)
-        base = self._physics.predict_current(ride)
+        base = self._prior.predict_current(ride)
         return base * slow * fast
+
+
+class TrustedBinnedAdaptiveEstimator(BinnedAdaptiveEstimator):
+    """Binned adaptive estimator with trust ramp and clamped corrections.
+
+    Subclass of `BinnedAdaptiveEstimator` that guards the per-bin fast
+    EWMA against noisy or starved bins:
+
+    - **Trust ramp**: blends the raw EWMA toward 1.0 (no correction)
+      when a bin has few observations. Full trust requires `trust_n`
+      observations.
+    - **Observation window**: optionally counts only observations
+      within the last `trust_window_s` seconds so trust can decay
+      when a bin hasn't been visited recently.
+    - **Clamping**: hard bounds on the per-bin correction prevent
+      catastrophic TTG blowups.
+
+    Parameters
+    ----------
+    prior : GradientPriorEstimator
+        Base gradient-aware estimator providing speed ratios and TTG.
+    trust_n : int, optional
+        Observations in a bin needed for full trust. Default 60.
+    trust_window_s : float or None, optional
+        Rolling window (seconds) for counting observations. ``None``
+        means cumulative (trust grows monotonically). Default None.
+    corr_min : float, optional
+        Hard floor on per-bin correction. Default 0.5.
+    corr_max : float, optional
+        Hard ceiling on per-bin correction. Default 1.5.
+    slow_span_s, fast_span_s, ramp_s, bin_size, cal_max_grad
+        Passed through to `BinnedAdaptiveEstimator`.
+    """
+
+    def __init__(
+        self,
+        prior: GradientPriorEstimator,
+        trust_n: int = 60,
+        trust_window_s: float | None = None,
+        corr_min: float = 0.5,
+        corr_max: float = 1.5,
+        slow_span_s: float = 3600.0,
+        fast_span_s: float = 300.0,
+        ramp_s: float = 600.0,
+        bin_size: int = 1,
+        cal_max_grad: float = 0.02,
+    ) -> None:
+        super().__init__(
+            prior=prior,
+            slow_span_s=slow_span_s,
+            fast_span_s=fast_span_s,
+            ramp_s=ramp_s,
+            bin_size=bin_size,
+            cal_max_grad=cal_max_grad,
+        )
+        self._trust_n = trust_n
+        self._trust_window_s = trust_window_s
+        self._corr_min = corr_min
+        self._corr_max = corr_max
+
+    def __str__(self) -> str:
+        cal = (
+            f"|g|<{self._cal_max_grad * 100:.0f}%"
+            if self._cal_max_grad < 1.0
+            else "all"
+        )
+        win = f"{int(self._trust_window_s)}s" if self._trust_window_s else "cumul"
+        return (
+            f"trusted binned adaptive (slow={int(self._slow_span_s)}s [{cal}], "
+            f"fast={int(self._fast_span_s)}s/{self._bin_size}%bin, "
+            f"trust={self._trust_n}obs/{win}, "
+            f"clamp=[{self._corr_min},{self._corr_max}], "
+            f"ramp={int(self._ramp_s)}s, {self._prior})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"TrustedBinnedAdaptiveEstimator(prior={self._prior!r}, "
+            f"trust_n={self._trust_n!r}, trust_window_s={self._trust_window_s!r}, "
+            f"corr_min={self._corr_min!r}, corr_max={self._corr_max!r}, "
+            f"slow_span_s={self._slow_span_s!r}, fast_span_s={self._fast_span_s!r}, "
+            f"ramp_s={self._ramp_s!r}, bin_size={self._bin_size!r}, "
+            f"cal_max_grad={self._cal_max_grad!r})"
+        )
+
+    def _corrections(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        """Slow correction + trust-ramped, clamped per-bin fast EWMA."""
+        df = ride.df
+        moving = ~df["paused"]
+
+        actual = self.safe_divide(df["delta_distance"], df["delta_time"])
+        actual = actual.where(moving)
+
+        predicted = self._prior.predict_current(ride)
+        ratio = self.safe_divide(actual, predicted)
+
+        gradients, _ = _row_gradients(ride)
+        grad_bins = _gradient_bin_pct(gradients, self._bin_size)
+
+        slow = _slow_correction(
+            ratio,
+            gradients,
+            moving,
+            self._cal_max_grad,
+            self._slow_span_s,
+            self._ramp_s,
+        )
+
+        # Per-bin fast EWMA with trust ramp and clamping
+        ratio_fast = self.safe_divide(actual, predicted * slow)
+        fast = pd.Series(1.0, index=df.index)
+        elapsed = df["delta_time"].cumsum()
+
+        for bin_pct, grp in ratio_fast.groupby(grad_bins):
+            bin_ewma = grp.ewm(span=self._fast_span_s, min_periods=1).mean()
+
+            # Observation count: cumulative or windowed
+            if self._trust_window_s is None:
+                count = np.arange(1, len(grp) + 1, dtype=float)
+            else:
+                bin_elapsed = elapsed.loc[grp.index].values
+                count = np.empty(len(grp))
+                for k in range(len(grp)):
+                    count[k] = np.sum(
+                        bin_elapsed[: k + 1] >= bin_elapsed[k] - self._trust_window_s
+                    )
+
+            trust = pd.Series(np.clip(count / self._trust_n, 0.0, 1.0), index=grp.index)
+            blended = trust * bin_ewma + (1 - trust) * 1.0
+            fast.loc[grp.index] = blended.clip(self._corr_min, self._corr_max)
+
+        fast = fast.fillna(1.0)
+        return slow, fast
 
 
 class PriorDEWMASpeedEstimator(BaseEstimator):
