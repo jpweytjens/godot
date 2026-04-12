@@ -12,9 +12,14 @@ _METRIC_META = {
     "mpe": {"suffix": "_mpe", "label": "MPE %", "fmt": "{:.1f}"},
     "mape": {"suffix": "_mape", "label": "MAPE %", "fmt": "{:.1f}"},
     "mov_mae": {"suffix": "_mov_mae", "label": "Mov MAE (min)", "fmt": "{:.2f}"},
+    "mov_rmse": {"suffix": "_mov_rmse", "label": "Mov RMSE (min)", "fmt": "{:.2f}"},
     "mov_mpe": {"suffix": "_mov_mpe", "label": "Mov MPE %", "fmt": "{:.1f}"},
     "mov_mape": {"suffix": "_mov_mape", "label": "Mov MAPE %", "fmt": "{:.1f}"},
 }
+
+# Metrics applicable to each time basis
+_WALLCLOCK_METRICS = {"mae", "rmse", "mpe", "mape"}
+_MOVING_METRICS = {"mov_mae", "mov_rmse", "mov_mpe", "mov_mape"}
 
 _INFO_COLS = [
     "ride",
@@ -155,56 +160,79 @@ def write_html_report(
     col_to_name, metric_cols = _discover_estimators(results_df, selected_metrics)
     est_names = list(col_to_name.values())
 
-    # --- Global summary: mean, median, win count per metric ---
-    global_rows = []
-    for m in selected_metrics:
-        meta = _METRIC_META[m]
-        is_signed = "mpe" in m and "mape" not in m
-        mean_row: dict[str, object] = {"Metric": f"{meta['label']} (mean)"}
-        median_row: dict[str, object] = {"Metric": f"{meta['label']} (median)"}
-        for ek, col in metric_cols[m].items():
-            name = col_to_name[ek]
-            mean_row[name] = results_df[col].mean()
-            median_row[name] = results_df[col].median()
-        global_rows.extend([mean_row, median_row])
+    # --- Global summary: split by time basis ---
+    def _global_summary(
+        metrics: list[str],
+        est_filter: set[str],
+        caption: str,
+    ) -> str:
+        filtered_names = [n for ek, n in col_to_name.items() if ek in est_filter]
+        if not filtered_names or not metrics:
+            return ""
+        rows = []
+        for m in metrics:
+            meta = _METRIC_META[m]
+            is_signed = "mpe" in m and "mape" not in m
+            mean_row: dict[str, object] = {"Metric": f"{meta['label']} (mean)"}
+            median_row: dict[str, object] = {"Metric": f"{meta['label']} (median)"}
+            filtered_cols = {
+                ek: col for ek, col in metric_cols[m].items() if ek in est_filter
+            }
+            for ek, col in filtered_cols.items():
+                name = col_to_name[ek]
+                mean_row[name] = results_df[col].mean()
+                median_row[name] = results_df[col].median()
+            rows.extend([mean_row, median_row])
 
-        # Win count: which estimator is best per ride
-        if metric_cols[m]:
-            cols_map = {col: col_to_name[ek] for ek, col in metric_cols[m].items()}
-            metric_df = results_df[list(cols_map.keys())].rename(columns=cols_map)
-            if is_signed:
-                winners = metric_df.abs().idxmin(axis=1)
-            else:
-                winners = metric_df.idxmin(axis=1)
-            counts = winners.value_counts()
-            win_row: dict[str, object] = {"Metric": f"{meta['label']} (wins)"}
-            for name in est_names:
-                win_row[name] = counts.get(name, 0)
-            global_rows.append(win_row)
+            if filtered_cols:
+                cols_map = {col: col_to_name[ek] for ek, col in filtered_cols.items()}
+                metric_df = results_df[list(cols_map.keys())].rename(columns=cols_map)
+                if is_signed:
+                    winners = metric_df.abs().idxmin(axis=1)
+                else:
+                    winners = metric_df.idxmin(axis=1)
+                counts = winners.value_counts()
+                win_row: dict[str, object] = {"Metric": f"{meta['label']} (wins)"}
+                for name in filtered_names:
+                    win_row[name] = counts.get(name, 0)
+                rows.append(win_row)
 
-    global_avg = pd.DataFrame(global_rows).set_index("Metric")
+        if not rows:
+            return ""
+        df = pd.DataFrame(rows).set_index("Metric")
 
-    # Rows whose metric name contains "MPE" but not "MAPE" are signed
-    _signed_labels = {
-        f"{_METRIC_META[m]['label']}"
-        for m in selected_metrics
-        if "mpe" in m and "mape" not in m
-    }
+        signed_labels = {
+            _METRIC_META[m]["label"] for m in metrics if "mpe" in m and "mape" not in m
+        }
 
-    def _highlight_global(s: pd.Series) -> list[str]:
-        if "(wins)" in s.name:
-            return _highlight_max(s)
-        label = s.name.rsplit(" (", 1)[0]
-        if label in _signed_labels:
-            return _highlight_min_abs(s)
-        return _highlight_min(s)
+        def _hl(s: pd.Series) -> list[str]:
+            if "(wins)" in s.name:
+                return _highlight_max(s)
+            label = s.name.rsplit(" (", 1)[0]
+            if label in signed_labels:
+                return _highlight_min_abs(s)
+            return _highlight_min(s)
 
-    global_html = (
-        global_avg.style.apply(_highlight_global, axis=1)
-        .format("{:.2f}")
-        .set_table_styles(_STYLES)
-        .set_caption("Global summary")
-        .to_html()
+        return (
+            df.style.apply(_hl, axis=1)
+            .format("{:.2f}")
+            .set_table_styles(_STYLES)
+            .set_caption(caption)
+            .to_html()
+        )
+
+    # Partition estimators by time basis (T vs M) based on their key prefix
+    t_estimators = {ek for ek in col_to_name if ek.split("_")[1:2] == ["t"]}
+    m_estimators = {ek for ek in col_to_name if ek.split("_")[1:2] == ["m"]}
+
+    wc_metrics = [m for m in selected_metrics if m in _WALLCLOCK_METRICS]
+    mv_metrics = [m for m in selected_metrics if m in _MOVING_METRICS]
+
+    global_wc_html = _global_summary(
+        wc_metrics, t_estimators, "Wall-clock metrics (T estimators)"
+    )
+    global_mv_html = _global_summary(
+        mv_metrics, m_estimators, "Moving-time metrics (M estimators)"
     )
 
     # --- Per-ride tables: one table per metric ---
@@ -248,7 +276,11 @@ def write_html_report(
 
     # --- Write HTML ---
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sections = ["<h2>Global averages</h2>", global_html]
+    sections = []
+    if global_wc_html:
+        sections.extend(["<h2>Wall-clock metrics (T estimators)</h2>", global_wc_html])
+    if global_mv_html:
+        sections.extend(["<h2>Moving-time metrics (M estimators)</h2>", global_mv_html])
     for html in per_ride_tables:
         sections.append(f"<h2>Per-ride</h2>{html}")
     for html in by_type_tables:
