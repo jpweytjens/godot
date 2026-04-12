@@ -57,6 +57,10 @@ def _highlight_min(s: pd.Series) -> list[str]:
     return [_BOLD if v == s.min() else "" for v in s]
 
 
+def _highlight_max(s: pd.Series) -> list[str]:
+    return [_BOLD if v == s.max() else "" for v in s]
+
+
 def _highlight_min_abs(s: pd.Series) -> list[str]:
     return [_BOLD if abs(v) == s.abs().min() else "" for v in s]
 
@@ -151,21 +155,45 @@ def write_html_report(
     col_to_name, metric_cols = _discover_estimators(results_df, selected_metrics)
     est_names = list(col_to_name.values())
 
-    # --- Global averages: one row per metric, columns = estimators ---
+    # --- Global summary: mean, median, win count per metric ---
     global_rows = []
     for m in selected_metrics:
         meta = _METRIC_META[m]
-        row: dict[str, object] = {"Metric": meta["label"]}
+        is_signed = "mpe" in m and "mape" not in m
+        mean_row: dict[str, object] = {"Metric": f"{meta['label']} (mean)"}
+        median_row: dict[str, object] = {"Metric": f"{meta['label']} (median)"}
         for ek, col in metric_cols[m].items():
-            row[col_to_name[ek]] = results_df[col].mean()
-        global_rows.append(row)
+            name = col_to_name[ek]
+            mean_row[name] = results_df[col].mean()
+            median_row[name] = results_df[col].median()
+        global_rows.extend([mean_row, median_row])
+
+        # Win count: which estimator is best per ride
+        if metric_cols[m]:
+            cols_map = {col: col_to_name[ek] for ek, col in metric_cols[m].items()}
+            metric_df = results_df[list(cols_map.keys())].rename(columns=cols_map)
+            if is_signed:
+                winners = metric_df.abs().idxmin(axis=1)
+            else:
+                winners = metric_df.idxmin(axis=1)
+            counts = winners.value_counts()
+            win_row: dict[str, object] = {"Metric": f"{meta['label']} (wins)"}
+            for name in est_names:
+                win_row[name] = counts.get(name, 0)
+            global_rows.append(win_row)
+
     global_avg = pd.DataFrame(global_rows).set_index("Metric")
 
+    def _highlight_global(s: pd.Series) -> list[str]:
+        if "(wins)" in s.name:
+            return _highlight_max(s)
+        return _highlight_min(s)
+
     global_html = (
-        global_avg.style.apply(_highlight_min, axis=1)
+        global_avg.style.apply(_highlight_global, axis=1)
         .format("{:.2f}")
         .set_table_styles(_STYLES)
-        .set_caption("Global averages")
+        .set_caption("Global summary")
         .to_html()
     )
 
