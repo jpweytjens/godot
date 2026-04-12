@@ -24,16 +24,19 @@ from godot.estimators import (
 from godot.pause import NoPause, WallClockPause
 from godot.plot import (
     _pause_intervals,
-    actual_speed,
     avg_speed_overview,
     comparison_errors,
     downsample_for_plot,
     error_pct_refs,
     error_refs,
     eta_error,
+    eta_error_moving,
+    eta_error_moving_pct,
     eta_error_pct,
     pause_bands,
     prep_time_axis,
+    speed_raw,
+    speed_smoothed_comparison,
 )
 from godot.ride import load_ride
 from godot.theme import TOL_BRIGHT
@@ -49,6 +52,13 @@ _ratio_df = pd.read_parquet(Path("data/gradient_ratios.parquet"))
 GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
 GLOBAL_PRIOR_KMH = 28.8  # tunable flat-ground speed
 TOTAL_SYSTEM_MASS = 85 + 10  # rider + bike, for physics-based estimators
+
+
+def _time_basis(name: str) -> str:
+    """Extract time basis ('T' or 'M') from estimator name."""
+    parts = name.split("_")
+    return parts[1].upper() if len(parts) >= 2 else "T"
+
 
 # Estimator naming convention: {level}_{T|M}_{prior}_{name}
 #   level: 0-4 (complexity / correction layers)
@@ -227,12 +237,17 @@ def run(
             else None
         )
 
-        # Per-estimator: 1x3 (ETA error | MPE % | speed), time domain
+        # Per-estimator: 5-panel stack
         for name, result in results.items():
             result_prepped = downsample_for_plot(
                 prep_time_axis(result, warmup_pct=0.02)
             )
             is_ref = name in (REF_TOTAL, REF_MOVING)
+
+            # Select error functions based on time basis
+            is_moving = _time_basis(name) == "M"
+            err_fn = eta_error_moving if is_moving else eta_error
+            err_pct_fn = eta_error_moving_pct if is_moving else eta_error_pct
 
             # Reference layers (behind the estimator line)
             ref_error: list[alt.Chart] = []
@@ -244,7 +259,7 @@ def run(
                 ]:
                     if ref_prep is not None:
                         ref_error.append(
-                            eta_error(
+                            err_fn(
                                 ref_prep,
                                 color=color,
                                 opacity=REF_OPACITY,
@@ -252,7 +267,7 @@ def run(
                             )
                         )
                         ref_pct.append(
-                            eta_error_pct(
+                            err_pct_fn(
                                 ref_prep,
                                 color=color,
                                 opacity=REF_OPACITY,
@@ -263,14 +278,14 @@ def run(
             error_chart = alt.layer(
                 pause_bands(ride_prepped, pause_df=pause_df),
                 *ref_error,
-                eta_error(result_prepped),
+                err_fn(result_prepped),
                 error_refs(),
             ).properties(width=chart_width, height=chart_height)
 
             error_pct_chart = alt.layer(
                 pause_bands(ride_prepped, pause_df=pause_df),
                 *ref_pct,
-                eta_error_pct(result_prepped),
+                err_pct_fn(result_prepped),
                 error_pct_refs(),
             ).properties(width=chart_width, height=chart_height)
 
@@ -284,13 +299,24 @@ def run(
                 ),
             ).properties(width=chart_width, height=chart_height)
 
-            actual_speed_chart = alt.layer(
+            # Raw speed: unsmoothed actual vs predicted
+            raw_speed_chart = alt.layer(
                 pause_bands(ride_prepped, pause_df=pause_df),
-                actual_speed(ride_prepped, result_prepped),
+                speed_raw(ride_prepped, result_prepped),
+            ).properties(width=chart_width, height=chart_height)
+
+            # Smoothed speed: both 60s-smoothed
+            smooth_speed_chart = alt.layer(
+                pause_bands(ride_prepped, pause_df=pause_df),
+                speed_smoothed_comparison(ride_prepped, result_prepped),
             ).properties(width=chart_width, height=chart_height)
 
             chart = (
-                error_chart & error_pct_chart & speed_chart & actual_speed_chart
+                error_chart
+                & error_pct_chart
+                & speed_chart
+                & raw_speed_chart
+                & smooth_speed_chart
             ).properties(title=alt.Title(f"{name} \u2014 {ride.label}"))
             safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
             chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
@@ -317,17 +343,21 @@ def run(
     warmup_m = ride.distance * 0.02
     for name, result in results.items():
         col = name.lower().replace(" ", "_")
-        # Wall-clock metrics (vs total remaining time)
-        wc = compute_metrics(result, warmup_m, moving_only=False)
-        row[f"{col}_mae"] = wc["mae_min"]
-        row[f"{col}_rmse"] = wc["rmse_min"]
-        row[f"{col}_mpe"] = wc["mpe_pct"]
-        row[f"{col}_mape"] = wc["mape_pct"]
-        # Moving-time metrics (vs remaining moving time)
-        mv = compute_metrics(result, warmup_m, moving_only=True)
-        row[f"{col}_mov_mae"] = mv["mae_min"]
-        row[f"{col}_mov_mpe"] = mv["mpe_pct"]
-        row[f"{col}_mov_mape"] = mv["mape_pct"]
+        basis = _time_basis(name)
+        if basis == "T":
+            # Wall-clock metrics (vs total remaining time)
+            wc = compute_metrics(result, warmup_m, moving_only=False)
+            row[f"{col}_mae"] = wc["mae_min"]
+            row[f"{col}_rmse"] = wc["rmse_min"]
+            row[f"{col}_mpe"] = wc["mpe_pct"]
+            row[f"{col}_mape"] = wc["mape_pct"]
+        else:
+            # Moving-time metrics (vs remaining moving time)
+            mv = compute_metrics(result, warmup_m, moving_only=True)
+            row[f"{col}_mov_mae"] = mv["mae_min"]
+            row[f"{col}_mov_rmse"] = mv["rmse_min"]
+            row[f"{col}_mov_mpe"] = mv["mpe_pct"]
+            row[f"{col}_mov_mape"] = mv["mape_pct"]
     return row
 
 
@@ -369,7 +399,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--metrics",
         nargs="+",
-        choices=["mae", "rmse", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"],
+        choices=[
+            "mae",
+            "rmse",
+            "mpe",
+            "mape",
+            "mov_mae",
+            "mov_rmse",
+            "mov_mpe",
+            "mov_mape",
+        ],
         default=None,
         metavar="METRIC",
         help="Metrics to display (default depends on --no-plots)",
@@ -378,9 +417,18 @@ if __name__ == "__main__":
 
     if args.metrics is None:
         args.metrics = (
-            ["rmse", "mpe", "mape", "mov_mpe", "mov_mape"]
+            ["rmse", "mpe", "mape", "mov_rmse", "mov_mpe", "mov_mape"]
             if args.no_plots
-            else ["mae", "rmse", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"]
+            else [
+                "mae",
+                "rmse",
+                "mpe",
+                "mape",
+                "mov_mae",
+                "mov_rmse",
+                "mov_mpe",
+                "mov_mape",
+            ]
         )
 
     paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
