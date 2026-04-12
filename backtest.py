@@ -19,9 +19,11 @@ from godot.estimators import (
 )
 from godot.pause import NoPause, WallClockPause
 from godot.plot import (
+    _pause_intervals,
     actual_speed,
     avg_speed_overview,
     comparison_errors,
+    downsample_for_plot,
     error_pct_refs,
     error_refs,
     eta_error,
@@ -164,6 +166,10 @@ def run(
     distance_method: str = "haversine",
     smooth_speed: bool = True,
     smooth_window: str = "5s",
+    save_plots: bool = True,
+    chart_width: int = 1200,
+    chart_height: int = 200,
+    comparison_height: int = 400,
 ) -> dict:
     """Run all estimators against a single GPX file, save plots, return metrics.
 
@@ -177,6 +183,14 @@ def run(
         Whether to apply the rolling speed smoother. Default True.
     smooth_window : str, optional
         Rolling window size as a pandas time offset string. Default `"5s"`.
+    save_plots : bool, optional
+        Whether to generate and save Altair charts. Default True.
+    chart_width : int, optional
+        Width in pixels for individual charts. Default 1200.
+    chart_height : int, optional
+        Height in pixels for individual charts. Default 200.
+    comparison_height : int, optional
+        Height in pixels for the comparison chart. Default 400.
 
     Returns
     -------
@@ -189,93 +203,107 @@ def run(
         name: backtest(ride, est, pause) for name, (est, pause) in ESTIMATORS.items()
     }
 
-    out_dir = Path("output") / "backtests" / ride.name
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if save_plots:
+        out_dir = Path("output") / "backtests" / ride.name
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare ride data for plotting (with warmup clipped)
-    ride_prepped = prep_time_axis(ride.df, warmup_pct=0.02)
+        # Prepare ride data for plotting (with warmup clipped, then downsampled)
+        ride_prepped = downsample_for_plot(prep_time_axis(ride.df, warmup_pct=0.02))
+        pause_df = _pause_intervals(ride_prepped)
 
-    # Reference results: total (yellow) and moving (cyan)
-    ref_total = results.get(REF_TOTAL)
-    ref_total_prepped = (
-        prep_time_axis(ref_total, warmup_pct=0.02) if ref_total is not None else None
-    )
-    ref_moving = results.get(REF_MOVING)
-    ref_moving_prepped = (
-        prep_time_axis(ref_moving, warmup_pct=0.02) if ref_moving is not None else None
-    )
+        # Reference results: total (yellow) and moving (cyan)
+        ref_total = results.get(REF_TOTAL)
+        ref_total_prepped = (
+            downsample_for_plot(prep_time_axis(ref_total, warmup_pct=0.02))
+            if ref_total is not None
+            else None
+        )
+        ref_moving = results.get(REF_MOVING)
+        ref_moving_prepped = (
+            downsample_for_plot(prep_time_axis(ref_moving, warmup_pct=0.02))
+            if ref_moving is not None
+            else None
+        )
 
-    # Per-estimator: 1x3 (ETA error | MPE % | speed), time domain
-    for name, result in results.items():
-        result_prepped = prep_time_axis(result, warmup_pct=0.02)
-        is_ref = name in (REF_TOTAL, REF_MOVING)
+        # Per-estimator: 1x3 (ETA error | MPE % | speed), time domain
+        for name, result in results.items():
+            result_prepped = downsample_for_plot(
+                prep_time_axis(result, warmup_pct=0.02)
+            )
+            is_ref = name in (REF_TOTAL, REF_MOVING)
 
-        # Reference layers (behind the estimator line)
-        ref_error: list[alt.Chart] = []
-        ref_pct: list[alt.Chart] = []
-        if not is_ref:
-            for ref_prep, color in [
-                (ref_total_prepped, REF_TOTAL_COLOR),
-                (ref_moving_prepped, REF_MOVING_COLOR),
-            ]:
-                if ref_prep is not None:
-                    ref_error.append(
-                        eta_error(
-                            ref_prep, color=color, opacity=REF_OPACITY, stroke_width=1.0
+            # Reference layers (behind the estimator line)
+            ref_error: list[alt.Chart] = []
+            ref_pct: list[alt.Chart] = []
+            if not is_ref:
+                for ref_prep, color in [
+                    (ref_total_prepped, REF_TOTAL_COLOR),
+                    (ref_moving_prepped, REF_MOVING_COLOR),
+                ]:
+                    if ref_prep is not None:
+                        ref_error.append(
+                            eta_error(
+                                ref_prep,
+                                color=color,
+                                opacity=REF_OPACITY,
+                                stroke_width=1.0,
+                            )
                         )
-                    )
-                    ref_pct.append(
-                        eta_error_pct(
-                            ref_prep, color=color, opacity=REF_OPACITY, stroke_width=1.0
+                        ref_pct.append(
+                            eta_error_pct(
+                                ref_prep,
+                                color=color,
+                                opacity=REF_OPACITY,
+                                stroke_width=1.0,
+                            )
                         )
-                    )
 
-        error_chart = alt.layer(
-            pause_bands(ride_prepped),
-            *ref_error,
-            eta_error(result_prepped),
+            error_chart = alt.layer(
+                pause_bands(ride_prepped, pause_df=pause_df),
+                *ref_error,
+                eta_error(result_prepped),
+                error_refs(),
+            ).properties(width=chart_width, height=chart_height)
+
+            error_pct_chart = alt.layer(
+                pause_bands(ride_prepped, pause_df=pause_df),
+                *ref_pct,
+                eta_error_pct(result_prepped),
+                error_pct_refs(),
+            ).properties(width=chart_width, height=chart_height)
+
+            # Avg speed overview: estimated + actual cumulative averages
+            speed_chart = alt.layer(
+                pause_bands(ride_prepped, pause_df=pause_df),
+                avg_speed_overview(
+                    ride_prepped,
+                    ref_total_df=ref_total_prepped,
+                    ref_moving_df=ref_moving_prepped,
+                ),
+            ).properties(width=chart_width, height=chart_height)
+
+            actual_speed_chart = alt.layer(
+                pause_bands(ride_prepped, pause_df=pause_df),
+                actual_speed(ride_prepped, result_prepped),
+            ).properties(width=chart_width, height=chart_height)
+
+            chart = (
+                error_chart & error_pct_chart & speed_chart & actual_speed_chart
+            ).properties(title=alt.Title(f"{name} \u2014 {ride.label}"))
+            safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
+            chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
+
+        # Comparison: all estimators' ETA error on one chart
+        comp_chart = alt.layer(
+            pause_bands(ride_prepped, pause_df=pause_df),
+            comparison_errors(results, warmup_pct=0.02),
             error_refs(),
-        ).properties(width=800, height=200)
-
-        error_pct_chart = alt.layer(
-            pause_bands(ride_prepped),
-            *ref_pct,
-            eta_error_pct(result_prepped),
-            error_pct_refs(),
-        ).properties(width=800, height=200)
-
-        # Avg speed overview: estimated + actual cumulative averages
-        speed_chart = alt.layer(
-            pause_bands(ride_prepped),
-            avg_speed_overview(
-                ride_prepped,
-                ref_total_df=ref_total_prepped,
-                ref_moving_df=ref_moving_prepped,
-            ),
-        ).properties(width=800, height=200)
-
-        actual_speed_chart = alt.layer(
-            pause_bands(ride_prepped),
-            actual_speed(ride_prepped, result_prepped),
-        ).properties(width=800, height=200)
-
-        chart = (
-            error_chart & error_pct_chart & speed_chart & actual_speed_chart
-        ).properties(title=alt.Title(f"{name} \u2014 {ride.label}"))
-        safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
-        chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
-
-    # Comparison: all estimators' ETA error on one chart
-    comp_chart = alt.layer(
-        pause_bands(ride_prepped),
-        comparison_errors(results, warmup_pct=0.02),
-        error_refs(),
-    ).properties(
-        title=alt.Title(f"All estimators \u2014 {ride.label}"),
-        width=900,
-        height=350,
-    )
-    comp_chart.save(str(out_dir / "comparison.png"), scale_factor=2)
+        ).properties(
+            title=alt.Title(f"All estimators \u2014 {ride.label}"),
+            width=chart_width,
+            height=comparison_height,
+        )
+        comp_chart.save(str(out_dir / "comparison.png"), scale_factor=2)
 
     row: dict = {
         "ride": ride.name,
@@ -332,14 +360,26 @@ if __name__ == "__main__":
         help="Rolling window size for speed smoothing (default: 5s)",
     )
     parser.add_argument(
+        "--no-plots",
+        action="store_true",
+        help="Skip chart generation for faster runs",
+    )
+    parser.add_argument(
         "--metrics",
         nargs="+",
         choices=["mae", "rmse", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"],
-        default=["mae", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"],
+        default=None,
         metavar="METRIC",
-        help="Metrics to display (default: mae mpe mape mov_mae mov_mpe mov_mape)",
+        help="Metrics to display (default depends on --no-plots)",
     )
     args = parser.parse_args()
+
+    if args.metrics is None:
+        args.metrics = (
+            ["mape", "mov_mape"]
+            if args.no_plots
+            else ["mae", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"]
+        )
 
     paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
     if not paths:
@@ -349,12 +389,14 @@ if __name__ == "__main__":
 
     smooth_options = [s == "on" for s in args.smoothing]
     combos = list(product(paths, args.distance, smooth_options))
+    save_plots = not args.no_plots
     rows = process_map(
         run,
         [c[0] for c in combos],
         [c[1] for c in combos],
         [c[2] for c in combos],
         [args.smooth_window] * len(combos),
+        [save_plots] * len(combos),
         desc="Backtesting",
         unit="run",
     )
