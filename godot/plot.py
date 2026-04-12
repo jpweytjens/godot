@@ -55,6 +55,29 @@ def _pause_intervals(df: pd.DataFrame, min_pause_s: float = 60.0) -> pd.DataFram
     return pd.DataFrame(intervals, columns=["start_min", "end_min"])
 
 
+def downsample_for_plot(df: pd.DataFrame, freq: str = "5s") -> pd.DataFrame:
+    """Downsample a time-indexed DataFrame for plotting.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with a `time` column (datetime).
+    freq : str
+        Resample frequency (default ``"5s"``).
+
+    Returns
+    -------
+    pd.DataFrame
+        Downsampled copy with the same columns.
+    """
+    return (
+        df.resample(freq, on="time")
+        .first()
+        .dropna(subset=["distance_m"])
+        .reset_index(drop=False)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Layer functions — each returns an alt.Chart
 # ---------------------------------------------------------------------------
@@ -62,7 +85,11 @@ def _pause_intervals(df: pd.DataFrame, min_pause_s: float = 60.0) -> pd.DataFram
 X_ELAPSED = alt.X("elapsed_min:Q").title("Elapsed time (min)")
 
 
-def pause_bands(df: pd.DataFrame, min_pause_s: float = 10.0) -> alt.Chart:
+def pause_bands(
+    df: pd.DataFrame,
+    min_pause_s: float = 10.0,
+    pause_df: pd.DataFrame | None = None,
+) -> alt.Chart:
     """Blue semi-transparent bands for paused sections.
 
     Parameters
@@ -71,8 +98,11 @@ def pause_bands(df: pd.DataFrame, min_pause_s: float = 10.0) -> alt.Chart:
         Ride DataFrame with `paused`, `time`, and `elapsed_min` columns.
     min_pause_s : float, optional
         Minimum pause duration in seconds to show. Default 10.
+    pause_df : pd.DataFrame, optional
+        Pre-computed pause intervals. When provided, `df` and `min_pause_s`
+        are ignored for interval computation.
     """
-    intervals = _pause_intervals(df, min_pause_s)
+    intervals = pause_df if pause_df is not None else _pause_intervals(df, min_pause_s)
     return (
         alt.Chart(intervals)
         .mark_rect(opacity=0.15, color=TOL_BRIGHT[0])
@@ -290,9 +320,7 @@ def avg_speed_overview(
         .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
         .encode(
             x=X_ELAPSED,
-            y=alt.Y("speed_kmh:Q")
-            .title("Speed (km/h)")
-            .scale(domain=[0, 40], clamp=True),
+            y=alt.Y("speed_kmh:Q").title("Speed (km/h)").scale(zero=True),
             color=alt.Color("series:N")
             .scale(domain=series, range=colors)
             .legend(LEGEND_BOTTOM),
@@ -352,9 +380,7 @@ def actual_speed(
         .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
         .encode(
             x=X_ELAPSED,
-            y=alt.Y("speed_kmh:Q")
-            .title("Speed (km/h)")
-            .scale(domain=[0, 50], clamp=True),
+            y=alt.Y("speed_kmh:Q").title("Speed (km/h)").scale(zero=True),
             color=alt.Color("series:N")
             .scale(domain=series, range=colors)
             .legend(LEGEND_BOTTOM),
