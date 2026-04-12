@@ -181,6 +181,51 @@ def eta_error_pct(
     )
 
 
+def eta_error_moving(
+    result_df: pd.DataFrame,
+    color: str = TOL_VIBRANT[5],
+    opacity: float = 1.0,
+    stroke_width: float = 1.2,
+) -> alt.Chart:
+    """ETA error vs remaining moving time, in minutes."""
+    df = result_df.assign(delta_min=result_df["delta_moving_s"] / 60)
+    return (
+        alt.Chart(df)
+        .mark_line(
+            strokeWidth=stroke_width,
+            color=color,
+            opacity=opacity,
+            invalid="break-paths-filter-domains",
+        )
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("delta_min:Q").title("ETA \u2212 moving ATA (min)"),
+        )
+    )
+
+
+def eta_error_moving_pct(
+    result_df: pd.DataFrame,
+    color: str = TOL_VIBRANT[5],
+    opacity: float = 1.0,
+    stroke_width: float = 1.2,
+) -> alt.Chart:
+    """ETA error as percentage of actual remaining moving time."""
+    ata = result_df["ata_moving_s"]
+    pct = (result_df["delta_moving_s"] / ata).where(ata > 0) * 100
+    df = result_df.assign(delta_pct=pct)
+    return (
+        alt.Chart(df)
+        .mark_line(
+            strokeWidth=stroke_width,
+            color=color,
+            opacity=opacity,
+            invalid="break-paths-filter-domains",
+        )
+        .encode(x=X_ELAPSED, y=alt.Y("delta_pct:Q").title("Moving ETA error (%)"))
+    )
+
+
 def error_pct_refs() -> alt.Chart:
     """Horizontal reference lines at 0%, +10%, -10%."""
     zero = (
@@ -381,6 +426,107 @@ def actual_speed(
         .encode(
             x=X_ELAPSED,
             y=alt.Y("speed_kmh:Q").title("Speed (km/h)").scale(zero=True),
+            color=alt.Color("series:N")
+            .scale(domain=series, range=colors)
+            .legend(LEGEND_BOTTOM),
+            opacity=alt.Opacity("series:N")
+            .scale(domain=series, range=opacities)
+            .legend(None),
+            strokeWidth=alt.StrokeWidth("series:N")
+            .scale(domain=series, range=widths)
+            .legend(None),
+        )
+    )
+
+
+def speed_raw(
+    ride_df: pd.DataFrame,
+    result_df: pd.DataFrame,
+) -> alt.Chart:
+    """Raw unsmoothed actual speed vs raw predicted speed.
+
+    Parameters
+    ----------
+    ride_df : pd.DataFrame
+        Prepped ride DataFrame with `elapsed_min` and `speed_ms`.
+    result_df : pd.DataFrame
+        Estimator backtest result with `current_speed_ms` and `elapsed_min`.
+    """
+    speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
+    frames = [
+        ride_df[["elapsed_min"]].assign(
+            speed_kmh=ride_df["speed_ms"] * 3.6, series="Actual"
+        ),
+        result_df[["elapsed_min"]].assign(
+            speed_kmh=result_df[speed_col] * 3.6, series="Predicted"
+        ),
+    ]
+    series = ["Actual", "Predicted"]
+    colors = ["#888", TOL_VIBRANT[5]]
+    opacities = [0.25, 0.8]
+    widths = [0.5, 0.8]
+
+    combined = pd.concat(frames, ignore_index=True)
+    return (
+        alt.Chart(combined)
+        .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("speed_kmh:Q").title("Raw speed (km/h)").scale(zero=True),
+            color=alt.Color("series:N")
+            .scale(domain=series, range=colors)
+            .legend(LEGEND_BOTTOM),
+            opacity=alt.Opacity("series:N")
+            .scale(domain=series, range=opacities)
+            .legend(None),
+            strokeWidth=alt.StrokeWidth("series:N")
+            .scale(domain=series, range=widths)
+            .legend(None),
+        )
+    )
+
+
+def speed_smoothed_comparison(
+    ride_df: pd.DataFrame,
+    result_df: pd.DataFrame,
+    window: int = 60,
+) -> alt.Chart:
+    """Actual and predicted speed both smoothed with the same rolling window.
+
+    Parameters
+    ----------
+    ride_df : pd.DataFrame
+        Prepped ride DataFrame with `elapsed_min` and `speed_ms`.
+    result_df : pd.DataFrame
+        Estimator backtest result with `current_speed_ms` and `elapsed_min`.
+    window : int
+        Rolling window size in samples (1Hz data → seconds). Default 60.
+    """
+    speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
+    actual_smooth = (
+        (ride_df["speed_ms"] * 3.6).rolling(window, min_periods=1, center=True).mean()
+    )
+    pred_smooth = (
+        (result_df[speed_col] * 3.6).rolling(window, min_periods=1, center=True).mean()
+    )
+    frames = [
+        ride_df[["elapsed_min"]].assign(speed_kmh=actual_smooth, series="Actual (60s)"),
+        result_df[["elapsed_min"]].assign(
+            speed_kmh=pred_smooth, series="Predicted (60s)"
+        ),
+    ]
+    series = ["Actual (60s)", "Predicted (60s)"]
+    colors = ["#333", TOL_VIBRANT[5]]
+    opacities = [0.8, 1.0]
+    widths = [1.2, 1.5]
+
+    combined = pd.concat(frames, ignore_index=True)
+    return (
+        alt.Chart(combined)
+        .mark_line(strokeWidth=1, invalid="break-paths-filter-domains")
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("speed_kmh:Q").title("Smoothed speed (km/h)").scale(zero=True),
             color=alt.Color("series:N")
             .scale(domain=series, range=colors)
             .legend(LEGEND_BOTTOM),
