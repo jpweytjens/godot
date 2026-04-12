@@ -7,13 +7,13 @@ from pathlib import Path
 import pandas as pd
 
 _METRIC_META = {
-    "mae": {"suffix": "_mae", "label": "MAE", "fmt": "{:.2f}"},
-    "rmse": {"suffix": "_rmse", "label": "RMSE", "fmt": "{:.2f}"},
-    "mpe": {"suffix": "_mpe", "label": "MPE%", "fmt": "{:.1f}"},
-    "mape": {"suffix": "_mape", "label": "MAPE%", "fmt": "{:.1f}"},
-    "mov_mae": {"suffix": "_mov_mae", "label": "Mov MAE", "fmt": "{:.2f}"},
-    "mov_mpe": {"suffix": "_mov_mpe", "label": "Mov MPE%", "fmt": "{:.1f}"},
-    "mov_mape": {"suffix": "_mov_mape", "label": "Mov MAPE%", "fmt": "{:.1f}"},
+    "mae": {"suffix": "_mae", "label": "MAE (min)", "fmt": "{:.2f}"},
+    "rmse": {"suffix": "_rmse", "label": "RMSE (min)", "fmt": "{:.2f}"},
+    "mpe": {"suffix": "_mpe", "label": "MPE %", "fmt": "{:.1f}"},
+    "mape": {"suffix": "_mape", "label": "MAPE %", "fmt": "{:.1f}"},
+    "mov_mae": {"suffix": "_mov_mae", "label": "Mov MAE (min)", "fmt": "{:.2f}"},
+    "mov_mpe": {"suffix": "_mov_mpe", "label": "Mov MPE %", "fmt": "{:.1f}"},
+    "mov_mape": {"suffix": "_mov_mape", "label": "Mov MAPE %", "fmt": "{:.1f}"},
 }
 
 _INFO_COLS = [
@@ -61,6 +61,76 @@ def _highlight_min_abs(s: pd.Series) -> list[str]:
     return [_BOLD if abs(v) == s.abs().min() else "" for v in s]
 
 
+def _discover_estimators(
+    results_df: pd.DataFrame, selected_metrics: list[str]
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """Discover estimator keys and build column mappings.
+
+    Returns
+    -------
+    col_to_name : dict[str, str]
+        Estimator key (e.g. ``"adaptive_lerp"``) → display name.
+    metric_cols : dict[str, dict[str, str]]
+        metric key → {estimator_key: column_name}.
+    """
+    suffixes = sorted(
+        [_METRIC_META[m]["suffix"] for m in selected_metrics], key=len, reverse=True
+    )
+    all_names: set[str] = set()
+    for c in results_df.columns:
+        for s in suffixes:
+            if c.endswith(s):
+                all_names.add(c[: -len(s)])
+                break
+    col_to_name = {k: k.replace("_", " ").title() for k in sorted(all_names)}
+
+    metric_cols: dict[str, dict[str, str]] = {}
+    for m in selected_metrics:
+        suffix = _METRIC_META[m]["suffix"]
+        metric_cols[m] = {
+            ek: ek + suffix for ek in col_to_name if ek + suffix in results_df.columns
+        }
+    return col_to_name, metric_cols
+
+
+def _pivot_metric(
+    results_df: pd.DataFrame,
+    metric_key: str,
+    col_to_name: dict[str, str],
+    metric_cols: dict[str, str],
+    info_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    """Build a per-ride table for a single metric.
+
+    Rows = rides, columns = estimators.
+    """
+    cols = list(info_cols or [])
+    rename = {}
+    for ek, col in metric_cols.items():
+        cols.append(col)
+        rename[col] = col_to_name[ek]
+    return results_df[cols].rename(columns={**_INFO_RENAME, **rename})
+
+
+def _style_metric_table(
+    df: pd.DataFrame,
+    metric_key: str,
+    caption: str,
+    fmt: str,
+    estimator_names: list[str],
+    hide_index: bool = True,
+) -> str:
+    """Apply formatting and highlighting to a metric table."""
+    est_cols = pd.Index([c for c in df.columns if c in estimator_names])
+    fn = _highlight_min_abs if "mpe" in metric_key else _highlight_min
+    styler = df.style.apply(fn, axis=1, subset=est_cols)
+    fmt_map = {c: fmt for c in est_cols}
+    styler = styler.format(fmt_map).set_table_styles(_STYLES).set_caption(caption)
+    if hide_index:
+        styler = styler.hide(axis="index")
+    return styler.to_html()
+
+
 def write_html_report(
     results_df: pd.DataFrame,
     selected_metrics: list[str],
@@ -78,147 +148,81 @@ def write_html_report(
     output_path : Path
         Where to write the HTML file.
     """
-    # --- Discover estimator names from columns ---
-    # Match longest suffix first to avoid e.g. _mae matching _mov_mae columns
-    suffixes = sorted(
-        [m["suffix"] for m in _METRIC_META.values()], key=len, reverse=True
-    )
-    all_names: set[str] = set()
-    for c in results_df.columns:
-        for s in suffixes:
-            if c.endswith(s):
-                all_names.add(c[: -len(s)])
-                break
-    col_to_name = {k: k.replace("_", " ").title() for k in all_names}
+    col_to_name, metric_cols = _discover_estimators(results_df, selected_metrics)
+    est_names = list(col_to_name.values())
 
-    # --- Select and order columns ---
-    # Assign each column to the metric with the longest matching suffix
-    # to avoid e.g. _mae claiming _mov_mae columns
-    selected_by_len = sorted(
-        selected_metrics, key=lambda m: len(_METRIC_META[m]["suffix"]), reverse=True
-    )
-    metric_groups: dict[str, list[str]] = {m: [] for m in selected_metrics}
-    claimed: set[str] = set()
-    for m in selected_by_len:
-        suffix = _METRIC_META[m]["suffix"]
-        for c in results_df.columns:
-            if c.endswith(suffix) and c not in claimed:
-                metric_groups[m].append(c)
-                claimed.add(c)
-    metric_cols = [c for m in selected_metrics for c in metric_groups[m]]
-    results_df = results_df[_INFO_COLS + metric_cols]
-
-    # --- Rename columns for display ---
-    rename_map: dict[str, str] = dict(_INFO_RENAME)
+    # --- Global averages: one row per metric, columns = estimators ---
+    global_rows = []
     for m in selected_metrics:
         meta = _METRIC_META[m]
-        for c in metric_groups[m]:
-            est_key = c[: -len(meta["suffix"])]
-            rename_map[c] = f"{col_to_name[est_key]} {meta['label']}"
-    display_df = results_df.rename(columns=rename_map)
-
-    # --- Global averages ---
-    # Pivot: one row per estimator, one column per metric
-    est_keys = sorted(col_to_name.keys())
-    global_rows = []
-    for ek in est_keys:
-        row: dict[str, object] = {"Estimator": col_to_name[ek]}
-        for m in selected_metrics:
-            meta = _METRIC_META[m]
-            col = ek + meta["suffix"]
-            if col in results_df.columns:
-                row[meta["label"]] = results_df[col].mean()
+        row: dict[str, object] = {"Metric": meta["label"]}
+        for ek, col in metric_cols[m].items():
+            row[col_to_name[ek]] = results_df[col].mean()
         global_rows.append(row)
-    global_avg = pd.DataFrame(global_rows).set_index("Estimator")
-    sort_col = "MAE" if "mae" in selected_metrics else global_avg.columns[0]
-    global_avg = global_avg.sort_values(sort_col)
+    global_avg = pd.DataFrame(global_rows).set_index("Metric")
 
-    # --- Aggregations ---
-    agg_rename = {c: rename_map[c] for c in metric_cols}
-    by_type_df = (
-        results_df.groupby("route_type")[metric_cols].mean().rename(columns=agg_rename)
-    )
-    by_type_pauses_df = (
-        results_df.groupby(["route_type", "contains_pauses"])[metric_cols]
-        .mean()
-        .rename(columns=agg_rename)
-    )
-    by_pipeline_df = (
-        results_df.groupby(["distance_method", "speed_smoothed"])[metric_cols]
-        .mean()
-        .rename(columns=agg_rename)
-    )
-
-    # --- Format maps ---
-    display_groups: dict[str, list[str]] = {
-        m: [rename_map[c] for c in metric_groups[m]] for m in selected_metrics
-    }
-    fmt_map = {
-        c: _METRIC_META[m]["fmt"] for m in selected_metrics for c in display_groups[m]
-    }
-    global_fmt = {
-        _METRIC_META[m]["label"]: _METRIC_META[m]["fmt"] for m in selected_metrics
-    }
-
-    # --- Styled HTML tables ---
-    per_ride_styler = display_df.style
-    for m in selected_metrics:
-        cols = pd.Index(display_groups[m])
-        fn = _highlight_min_abs if m == "mpe" else _highlight_min
-        per_ride_styler = per_ride_styler.apply(fn, axis=1, subset=cols)
-    per_ride_html = (
-        per_ride_styler.format(fmt_map)
-        .set_table_styles(_STYLES)
-        .set_caption("Per-ride metrics")
-        .hide(axis="index")
-        .to_html()
-    )
-
-    global_styler = global_avg.style
-    for m in selected_metrics:
-        label = _METRIC_META[m]["label"]
-        if label not in global_avg.columns:
-            continue
-        fn = _highlight_min_abs if "mpe" in m else _highlight_min
-        global_styler = global_styler.apply(fn, axis=0, subset=[label])
     global_html = (
-        global_styler.format(global_fmt)
+        global_avg.style.apply(_highlight_min, axis=1)
+        .format("{:.2f}")
         .set_table_styles(_STYLES)
         .set_caption("Global averages")
         .to_html()
     )
 
-    by_type_html = (
-        by_type_df.style.format(fmt_map)
-        .set_table_styles(_STYLES)
-        .set_caption("Averages by route type")
-        .to_html()
-    )
-    by_type_pauses_html = (
-        by_type_pauses_df.style.format(fmt_map)
-        .set_table_styles(_STYLES)
-        .set_caption("Averages by route type × pauses")
-        .to_html()
-    )
-    by_pipeline_html = (
-        by_pipeline_df.style.format(fmt_map)
-        .set_table_styles(_STYLES)
-        .set_caption("Averages by pipeline")
-        .to_html()
+    # --- Per-ride tables: one table per metric ---
+    per_ride_tables: list[str] = []
+    for m in selected_metrics:
+        meta = _METRIC_META[m]
+        df = _pivot_metric(
+            results_df, m, col_to_name, metric_cols[m], info_cols=_INFO_COLS
+        )
+        html = _style_metric_table(
+            df, m, caption=meta["label"], fmt=meta["fmt"], estimator_names=est_names
+        )
+        per_ride_tables.append(html)
+
+    # --- Groupby tables: one table per metric per grouping ---
+    def _grouped_tables(groupby_cols: list[str], caption_prefix: str) -> list[str]:
+        tables = []
+        for m in selected_metrics:
+            meta = _METRIC_META[m]
+            raw_cols = list(metric_cols[m].values())
+            rename = {col: col_to_name[ek] for ek, col in metric_cols[m].items()}
+            agg = (
+                results_df.groupby(groupby_cols)[raw_cols].mean().rename(columns=rename)
+            )
+            est_cols = pd.Index([c for c in agg.columns if c in est_names])
+            fn = _highlight_min_abs if "mpe" in m else _highlight_min
+            html = (
+                agg.style.apply(fn, axis=1, subset=est_cols)
+                .format({c: meta["fmt"] for c in est_cols})
+                .set_table_styles(_STYLES)
+                .set_caption(f"{caption_prefix} — {meta['label']}")
+                .to_html()
+            )
+            tables.append(html)
+        return tables
+
+    by_type_tables = _grouped_tables(["route_type"], "By route type")
+    by_type_pauses_tables = _grouped_tables(
+        ["route_type", "contains_pauses"], "By route type × pauses"
     )
 
     # --- Write HTML ---
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    sections = ["<h2>Global averages</h2>", global_html]
+    for html in per_ride_tables:
+        sections.append(f"<h2>Per-ride</h2>{html}")
+    for html in by_type_tables:
+        sections.append(f"<h2>By route type</h2>{html}")
+    for html in by_type_pauses_tables:
+        sections.append(f"<h2>By route type × pauses</h2>{html}")
+
     output_path.write_text(
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<style>body{font-family:-apple-system,sans-serif;margin:2em;color:#222;}"
         "h2{margin-top:2em;font-size:1.05em;color:#555;border-bottom:1px solid #ddd;padding-bottom:4px;}"
-        "</style></head><body>"
-        f"<h2>Per-ride metrics</h2>{per_ride_html}"
-        f"<h2>Global averages</h2>{global_html}"
-        f"<h2>Averages by route type</h2>{by_type_html}"
-        f"<h2>Averages by route type × pauses</h2>{by_type_pauses_html}"
-        f"<h2>Averages by pipeline</h2>{by_pipeline_html}"
-        "</body></html>"
+        "table{margin-bottom:1.5em;}"
+        "</style></head><body>" + "\n".join(sections) + "</body></html>"
     )
     print(f"Saved {output_path}")
