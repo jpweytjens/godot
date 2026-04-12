@@ -486,29 +486,38 @@ def speed_raw(
     )
 
 
+def _time_smooth(series: pd.Series, time: pd.Series, window: str = "60s") -> pd.Series:
+    """Rolling mean using a time-based window, independent of sample rate."""
+    return (
+        series.to_frame("v")
+        .assign(t=time)
+        .set_index("t")
+        .rolling(window, center=True, min_periods=1)
+        .mean()["v"]
+        .values
+    )
+
+
 def speed_smoothed_comparison(
     ride_df: pd.DataFrame,
     result_df: pd.DataFrame,
-    window: int = 60,
+    window: str = "60s",
 ) -> alt.Chart:
     """Actual and predicted speed both smoothed with the same rolling window.
 
     Parameters
     ----------
     ride_df : pd.DataFrame
-        Prepped ride DataFrame with `elapsed_min` and `speed_ms`.
+        Prepped ride DataFrame with `elapsed_min`, `speed_ms`, and `time`.
     result_df : pd.DataFrame
-        Estimator backtest result with `current_speed_ms` and `elapsed_min`.
-    window : int
-        Rolling window size in samples (1Hz data → seconds). Default 60.
+        Estimator backtest result with `current_speed_ms`, `elapsed_min`,
+        and `time`.
+    window : str
+        Time-based rolling window (default ``"60s"``).
     """
     speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
-    actual_smooth = (
-        (ride_df["speed_ms"] * 3.6).rolling(window, min_periods=1, center=True).mean()
-    )
-    pred_smooth = (
-        (result_df[speed_col] * 3.6).rolling(window, min_periods=1, center=True).mean()
-    )
+    actual_smooth = _time_smooth(ride_df["speed_ms"] * 3.6, ride_df["time"], window)
+    pred_smooth = _time_smooth(result_df[speed_col] * 3.6, result_df["time"], window)
     frames = [
         ride_df[["elapsed_min"]].assign(speed_kmh=actual_smooth, series="Actual (60s)"),
         result_df[["elapsed_min"]].assign(
@@ -538,6 +547,82 @@ def speed_smoothed_comparison(
             .legend(None),
         )
     )
+
+
+def speed_residual_raw(
+    ride_df: pd.DataFrame,
+    result_df: pd.DataFrame,
+) -> alt.Chart:
+    """Raw residual: predicted minus actual speed, unsmoothed.
+
+    Parameters
+    ----------
+    ride_df : pd.DataFrame
+        Prepped ride DataFrame with `elapsed_min` and `speed_ms`.
+    result_df : pd.DataFrame
+        Estimator backtest result with `current_speed_ms` and `elapsed_min`.
+    """
+    speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
+    residual = (result_df[speed_col].values - ride_df["speed_ms"].values) * 3.6
+    df = ride_df[["elapsed_min"]].assign(residual_kmh=residual)
+    zero = (
+        alt.Chart(pd.DataFrame({"y": [0]}))
+        .mark_rule(color="black", strokeWidth=0.5)
+        .encode(y="y:Q")
+    )
+    return (
+        alt.Chart(df)
+        .mark_line(
+            strokeWidth=0.6,
+            color="#888",
+            opacity=0.4,
+            invalid="break-paths-filter-domains",
+        )
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("residual_kmh:Q").title("Raw residual (km/h)"),
+        )
+    ) + zero
+
+
+def speed_residual_smoothed(
+    ride_df: pd.DataFrame,
+    result_df: pd.DataFrame,
+    window: str = "60s",
+) -> alt.Chart:
+    """Smoothed residual: predicted minus actual speed, time-windowed.
+
+    Parameters
+    ----------
+    ride_df : pd.DataFrame
+        Prepped ride DataFrame with `elapsed_min`, `speed_ms`, and `time`.
+    result_df : pd.DataFrame
+        Estimator backtest result with `current_speed_ms`, `elapsed_min`,
+        and `time`.
+    window : str
+        Time-based rolling window. Default ``"60s"``.
+    """
+    speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
+    raw_residual = (result_df[speed_col].values - ride_df["speed_ms"].values) * 3.6
+    smooth_residual = _time_smooth(pd.Series(raw_residual), ride_df["time"], window)
+    df = ride_df[["elapsed_min"]].assign(residual_kmh=smooth_residual)
+    zero = (
+        alt.Chart(pd.DataFrame({"y": [0]}))
+        .mark_rule(color="black", strokeWidth=0.5)
+        .encode(y="y:Q")
+    )
+    return (
+        alt.Chart(df)
+        .mark_line(
+            strokeWidth=1.5,
+            color=TOL_VIBRANT[5],
+            invalid="break-paths-filter-domains",
+        )
+        .encode(
+            x=X_ELAPSED,
+            y=alt.Y("residual_kmh:Q").title("Smoothed residual (km/h)"),
+        )
+    ) + zero
 
 
 def speed_comparison(
