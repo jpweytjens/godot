@@ -38,8 +38,8 @@ from godot.plot import (
 from godot.ride import load_ride
 from godot.theme import TOL_BRIGHT
 
-REF_TOTAL = "Average speed (total)"
-REF_MOVING = "Average speed (moving)"
+REF_TOTAL = "0_T_avg_speed"
+REF_MOVING = "0_M_avg_speed"
 REF_TOTAL_COLOR = TOL_BRIGHT[3]  # yellow
 REF_MOVING_COLOR = TOL_BRIGHT[4]  # cyan
 REF_OPACITY = 0.7
@@ -50,66 +50,22 @@ GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
 GLOBAL_PRIOR_KMH = 28.8  # tunable flat-ground speed
 TOTAL_SYSTEM_MASS = 85 + 10  # rider + bike, for physics-based estimators
 
+# Estimator naming convention: {level}_{T|M}_{prior}_{name}
+#   level: 0-4 (complexity / correction layers)
+#   T|M:   Total time (NoPause) or Moving time (WallClockPause)
+#   prior: global (fixed), oracle, or estimator name (e.g. wgain)
+#   name:  descriptive correction layer
 ESTIMATORS = {
-    "Average speed (moving)": (AvgSpeedEstimator(moving_only=True), WallClockPause()),
-    "Average speed (total)": (AvgSpeedEstimator(moving_only=False), NoPause()),
-    # "Rolling 5 min (moving)": (
-    #     RollingAvgSpeedEstimator(window_s=300, moving_only=True),
-    #     WallClockPause(),
-    # ),
-    # "Rolling 10 min (moving)": (
-    #     RollingAvgSpeedEstimator(window_s=600, moving_only=True),
-    #     WallClockPause(),
-    # ),
-    # "Rolling 30 min (moving)": (
-    #     RollingAvgSpeedEstimator(window_s=1800, moving_only=True),
-    #     WallClockPause(),
-    # ),
-    # "Rolling 60 min (moving)": (
-    #     RollingAvgSpeedEstimator(window_s=3600, moving_only=True),
-    #     WallClockPause(),
-    # ),
-    # "Rolling median 30 min (moving)": (
-    #     RollingMedianSpeedEstimator(window_s=1800, moving_only=True),
-    #     WallClockPause(),
-    # ),
-    # "EWMA 60 min (moving)": (
-    #     EWMASpeedEstimator(span_s=3600, moving_only=True),
-    #     WallClockPause(),
-    # ),
-    # "EWMA 10 min (moving)": (
-    #     EWMASpeedEstimator(span_s=600, moving_only=True),
-    #     WallClockPause(),
-    # ),
-    # "DEWMA 10+60 min (moving)": (
-    #     DEWMASpeedEstimator(
-    #         slow_span_s=3600,
-    #         fast_span_s=600,
-    #         slow_weight=0.7,
-    #         fast_weight=0.3,
-    #         moving_only=True,
-    #     ),
-    #     WallClockPause(),
-    # ),
-    # "EWMA 10 min + prior (moving)": (
-    #     PriorEWMASpeedEstimator(
-    #         span_s=600,
-    #         prior_ms=28.8 / 3.6,
-    #         moving_only=True,
-    #     ),
-    #     WallClockPause(),
-    # ),
-    # "Lerp (moving)": (
-    #     LerpSpeedEstimator(
-    #         prior_ms=28.8 / 3.6,
-    #         fast_span_s=600,
-    #         ramp_s=600,
-    #         fast_weight=0.15,
-    #         moving_only=True,
-    #     ),
-    #     WallClockPause(),
-    # ),
-    "Adaptive lerp": (
+    # --- Level 0: no gradient awareness ---
+    "0_T_avg_speed": (
+        AvgSpeedEstimator(moving_only=False),
+        NoPause(),
+    ),
+    "0_M_avg_speed": (
+        AvgSpeedEstimator(moving_only=True),
+        WallClockPause(),
+    ),
+    "0_T_adaptive_lerp": (
         AdaptiveLerpSpeedEstimator(
             prior_ms=28.8 / 3.6,
             tau=60 * 60,
@@ -119,71 +75,20 @@ ESTIMATORS = {
         ),
         NoPause(),
     ),
-    # "Adaptive lerp (oracle prior)": (
-    #     OracleAdaptiveLerpEstimator(tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15),
-    #     NoPause(),
-    # ),
-    # "Adaptive lerp (noisy prior)": (
-    #     NoisyOracleAdaptiveLerpEstimator(
-    #         tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15, cv=0.10, seed=42
-    #     ),
-    #     NoPause(),
-    # ),
-    "Static gradient prior": (
+    # --- Level 1: gradient prior only (no online correction) ---
+    "1_T_global_empirical_prior": (
         GradientPriorEstimator(v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS),
         NoPause(),
     ),
-    "Physics gradient prior": (
+    "1_M_global_physics_prior": (
         PhysicsGradientPriorEstimator(
             mass_kg=TOTAL_SYSTEM_MASS,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),
         WallClockPause(),
     ),
-    "Adaptive physics (flat cal)": (
-        AdaptivePhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            cal_max_grad=0.02,
-        ),
-        WallClockPause(),
-    ),
-    # "Adaptive physics (all grad)": (
-    #     AdaptivePhysicsEstimator(
-    #         mass_kg=80,
-    #         v_flat_kmh=GLOBAL_PRIOR_KMH,
-    #         cal_max_grad=1.0,
-    #     ),
-    #     WallClockPause(),
-    # ),
-    "Binned adaptive physics": (
-        BinnedAdaptiveEstimator(
-            prior=PhysicsGradientPriorEstimator(
-                mass_kg=TOTAL_SYSTEM_MASS,
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ),
-        ),
-        WallClockPause(),
-    ),
-    "Binned adaptive empirical": (
-        BinnedAdaptiveEstimator(
-            prior=GradientPriorEstimator(
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-                ratios=GRADIENT_RATIOS,
-            ),
-        ),
-        NoPause(),
-    ),
-    "Trusted binned empirical": (
-        TrustedBinnedAdaptiveEstimator(
-            prior=GradientPriorEstimator(
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-                ratios=GRADIENT_RATIOS,
-            ),
-        ),
-        NoPause(),
-    ),
-    "Adaptive v_flat empirical": (
+    # --- Level 2: + slow EWMA or adaptive v_flat ---
+    "2_T_wgain_empirical_adaptive_vflat": (
         AdaptiveGradientPriorEstimator(
             v_flat_kmh=GLOBAL_PRIOR_KMH,
             ratios=GRADIENT_RATIOS,
@@ -191,7 +96,44 @@ ESTIMATORS = {
         ),
         NoPause(),
     ),
-    "Trusted binned physics": (
+    "2_M_global_physics_slow_cal": (
+        AdaptivePhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+            cal_max_grad=0.02,
+        ),
+        WallClockPause(),
+    ),
+    # --- Level 3: + per-bin fast EWMA ---
+    "3_T_global_empirical_binned": (
+        BinnedAdaptiveEstimator(
+            prior=GradientPriorEstimator(
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+                ratios=GRADIENT_RATIOS,
+            ),
+        ),
+        NoPause(),
+    ),
+    "3_M_global_physics_binned": (
+        BinnedAdaptiveEstimator(
+            prior=PhysicsGradientPriorEstimator(
+                mass_kg=TOTAL_SYSTEM_MASS,
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ),
+        ),
+        WallClockPause(),
+    ),
+    # --- Level 4: + trust ramp + clamping ---
+    "4_T_global_empirical_trusted": (
+        TrustedBinnedAdaptiveEstimator(
+            prior=GradientPriorEstimator(
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+                ratios=GRADIENT_RATIOS,
+            ),
+        ),
+        NoPause(),
+    ),
+    "4_M_global_physics_trusted": (
         TrustedBinnedAdaptiveEstimator(
             prior=PhysicsGradientPriorEstimator(
                 mass_kg=TOTAL_SYSTEM_MASS,
@@ -200,7 +142,7 @@ ESTIMATORS = {
         ),
         WallClockPause(),
     ),
-    "Oracle trusted binned empirical": (
+    "4_T_oracle_empirical_trusted": (
         OracleTrustedBinnedEstimator(
             prior=GradientPriorEstimator(
                 v_flat_kmh=GLOBAL_PRIOR_KMH,
@@ -209,7 +151,7 @@ ESTIMATORS = {
         ),
         NoPause(),
     ),
-    "Oracle trusted binned physics": (
+    "4_M_oracle_physics_trusted": (
         OracleTrustedBinnedEstimator(
             prior=PhysicsGradientPriorEstimator(
                 mass_kg=TOTAL_SYSTEM_MASS,
