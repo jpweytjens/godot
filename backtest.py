@@ -35,8 +35,8 @@ from godot.plot import (
     eta_error_pct,
     pause_bands,
     prep_time_axis,
-    speed_raw,
-    speed_smoothed_comparison,
+    speed_residual_raw,
+    speed_residual_smoothed,
 )
 from godot.ride import load_ride
 from godot.theme import TOL_BRIGHT
@@ -299,25 +299,34 @@ def run(
                 ),
             ).properties(width=chart_width, height=chart_height)
 
-            # Raw speed: unsmoothed actual vs predicted
-            raw_speed_chart = alt.layer(
+            # Speed residual: raw (predicted - actual)
+            raw_residual_chart = alt.layer(
                 pause_bands(ride_prepped, pause_df=pause_df),
-                speed_raw(ride_prepped, result_prepped),
+                speed_residual_raw(ride_prepped, result_prepped),
             ).properties(width=chart_width, height=chart_height)
 
-            # Smoothed speed: both 60s-smoothed
-            smooth_speed_chart = alt.layer(
+            # Speed residual: 60s smoothed
+            smooth_residual_chart = alt.layer(
                 pause_bands(ride_prepped, pause_df=pause_df),
-                speed_smoothed_comparison(ride_prepped, result_prepped),
+                speed_residual_smoothed(ride_prepped, result_prepped),
             ).properties(width=chart_width, height=chart_height)
 
             chart = (
-                error_chart
-                & error_pct_chart
-                & speed_chart
-                & raw_speed_chart
-                & smooth_speed_chart
-            ).properties(title=alt.Title(f"{name} \u2014 {ride.label}"))
+                (
+                    error_chart
+                    & error_pct_chart
+                    & speed_chart
+                    & raw_residual_chart
+                    & smooth_residual_chart
+                )
+                .resolve_scale(
+                    color="independent",
+                    opacity="independent",
+                    strokeWidth="independent",
+                    strokeDash="independent",
+                )
+                .properties(title=alt.Title(f"{name} \u2014 {ride.label}"))
+            )
             safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
             chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
 
