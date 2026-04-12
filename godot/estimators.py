@@ -793,6 +793,46 @@ class StaticVFlat(VFlatEstimator):
         return "static"
 
 
+class OracleVFlat(VFlatEstimator):
+    """Returns the actual whole-ride flat moving average at every row.
+
+    This is a cheating estimator — it uses future information to return
+    the true flat-section average speed as a constant. Useful for
+    isolating the EWMA correction layer from v_flat estimation errors.
+
+    Parameters
+    ----------
+    max_grad : float
+        Max |gradient| (fraction) to consider flat. Default 0.02.
+    """
+
+    def __init__(self, max_grad: float = 0.02) -> None:
+        self._max_grad = max_grad
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        moving = ~df["paused"]
+        gradients, _ = _row_gradients(ride)
+
+        flat_mask = moving & (gradients.abs() < self._max_grad)
+        flat_dist = df.loc[flat_mask, "delta_distance"].sum()
+        flat_time = df.loc[flat_mask, "delta_time"].sum()
+        v_flat_ms = (flat_dist / flat_time) if flat_time > 0 else v_flat_init_ms
+
+        return pd.Series(v_flat_ms, index=df.index)
+
+    def __str__(self) -> str:
+        return "oracle"
+
+    def __repr__(self) -> str:
+        return f"OracleVFlat(max_grad={self._max_grad!r})"
+
+
 class FlatSpeedVFlat(VFlatEstimator):
     """Cumulative average moving speed on flat sections.
 

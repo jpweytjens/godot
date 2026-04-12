@@ -12,6 +12,7 @@ from godot.estimators import (
     EwmaLockVFlat,
     FlatSpeedVFlat,
     MedianLockVFlat,
+    OracleVFlat,
     VFlatEstimator,
     WeightedGainVFlat,
     _row_gradients,
@@ -24,6 +25,7 @@ GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
 GLOBAL_PRIOR_KMH = 28.8
 
 ESTIMATORS: dict[str, VFlatEstimator] = {
+    "Oracle": OracleVFlat(),
     "Flat speed (2%)": FlatSpeedVFlat(max_grad=0.02),
     "Flat speed (5%)": FlatSpeedVFlat(max_grad=0.05),
     "Weighted gain (default)": WeightedGainVFlat(),
