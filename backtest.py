@@ -114,16 +114,16 @@ ESTIMATORS = {
         ),
         NoPause(),
     ),
-    "Adaptive lerp (oracle prior)": (
-        OracleAdaptiveLerpEstimator(tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15),
-        NoPause(),
-    ),
-    "Adaptive lerp (noisy prior)": (
-        NoisyOracleAdaptiveLerpEstimator(
-            tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15, cv=0.10, seed=42
-        ),
-        NoPause(),
-    ),
+    # "Adaptive lerp (oracle prior)": (
+    #     OracleAdaptiveLerpEstimator(tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15),
+    #     NoPause(),
+    # ),
+    # "Adaptive lerp (noisy prior)": (
+    #     NoisyOracleAdaptiveLerpEstimator(
+    #         tau=300, k=2.0, fast_span_s=3600, fast_weight=0.15, cv=0.10, seed=42
+    #     ),
+    #     NoPause(),
+    # ),
     "Static gradient prior": (
         GradientPriorEstimator(v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS),
         NoPause(),
@@ -143,14 +143,14 @@ ESTIMATORS = {
         ),
         WallClockPause(),
     ),
-    "Adaptive physics (all grad)": (
-        AdaptivePhysicsEstimator(
-            mass_kg=80,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            cal_max_grad=1.0,
-        ),
-        WallClockPause(),
-    ),
+    # "Adaptive physics (all grad)": (
+    #     AdaptivePhysicsEstimator(
+    #         mass_kg=80,
+    #         v_flat_kmh=GLOBAL_PRIOR_KMH,
+    #         cal_max_grad=1.0,
+    #     ),
+    #     WallClockPause(),
+    # ),
     "Binned adaptive physics": (
         BinnedAdaptivePhysicsEstimator(
             mass_kg=80,
@@ -376,7 +376,7 @@ if __name__ == "__main__":
 
     if args.metrics is None:
         args.metrics = (
-            ["mape", "mov_mape"]
+            ["mpe", "mape", "mov_mpe", "mov_mape"]
             if args.no_plots
             else ["mae", "mpe", "mape", "mov_mae", "mov_mpe", "mov_mape"]
         )
