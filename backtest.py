@@ -397,6 +397,7 @@ if __name__ == "__main__":
         [c[2] for c in combos],
         [args.smooth_window] * len(combos),
         [save_plots] * len(combos),
+        chunksize=1,
         desc="Backtesting",
         unit="run",
     )
