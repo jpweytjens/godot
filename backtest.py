@@ -175,55 +175,6 @@ ESTIMATORS = {
         ),
         WallClockPause(),
     ),
-    # --- Level 2 realistic: adaptive v_flat with realistic ratios ---
-    "2_M_wgain_realistic_adaptive_vflat": (
-        AdaptiveGradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ratios=REALISTIC_RATIOS,
-            vflat_estimator=WeightedGainVFlat(),
-        ),
-        WallClockPause(),
-    ),
-    "2_M_flatspeed_realistic_adaptive_vflat": (
-        AdaptiveGradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ratios=REALISTIC_RATIOS,
-            vflat_estimator=FlatSpeedVFlat(),
-        ),
-        WallClockPause(),
-    ),
-    "2_M_ewmalock_realistic_adaptive_vflat": (
-        AdaptiveGradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ratios=REALISTIC_RATIOS,
-            vflat_estimator=EwmaLockVFlat(),
-        ),
-        WallClockPause(),
-    ),
-    "2_M_medianlock_realistic_adaptive_vflat": (
-        AdaptiveGradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ratios=REALISTIC_RATIOS,
-            vflat_estimator=MedianLockVFlat(),
-        ),
-        WallClockPause(),
-    ),
-    "2_M_priorfree_realistic_adaptive_vflat": (
-        AdaptiveGradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ratios=REALISTIC_RATIOS,
-            vflat_estimator=PriorFreeVFlat(),
-        ),
-        WallClockPause(),
-    ),
-    "2_M_priorfree_ewma_realistic_adaptive_vflat": (
-        AdaptiveGradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ratios=REALISTIC_RATIOS,
-            vflat_estimator=PriorFreeEwmaVFlat(),
-        ),
-        WallClockPause(),
-    ),
     # --- Calibrating physics: self-contained realistic + EWMA v_flat ---
     "5_M_calibrating_physics": (
         CalibratingPhysicsEstimator(
@@ -523,37 +474,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--metrics",
         nargs="+",
-        choices=[
-            "mae",
-            "rmse",
-            "mpe",
-            "mape",
-            "mov_mae",
-            "mov_rmse",
-            "mov_mpe",
-            "mov_mape",
-        ],
+        choices=["mae", "rmse", "mpe", "mape"],
         default=None,
         metavar="METRIC",
-        help="Metrics to display (default depends on --no-plots)",
+        help="Metrics to display (default: all)",
     )
     args = parser.parse_args()
 
     if args.metrics is None:
-        args.metrics = (
-            ["rmse", "mpe", "mape", "mov_rmse", "mov_mpe", "mov_mape"]
-            if args.no_plots
-            else [
-                "mae",
-                "rmse",
-                "mpe",
-                "mape",
-                "mov_mae",
-                "mov_rmse",
-                "mov_mpe",
-                "mov_mape",
-            ]
-        )
+        args.metrics = ["mae", "rmse", "mpe", "mape"]
 
     paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
     if not paths:

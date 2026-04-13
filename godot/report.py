@@ -11,15 +11,7 @@ _METRIC_META = {
     "rmse": {"suffix": "_rmse", "label": "RMSE (min)", "fmt": "{:.2f}"},
     "mpe": {"suffix": "_mpe", "label": "MPE %", "fmt": "{:.1f}"},
     "mape": {"suffix": "_mape", "label": "MAPE %", "fmt": "{:.1f}"},
-    "mov_mae": {"suffix": "_mov_mae", "label": "Mov MAE (min)", "fmt": "{:.2f}"},
-    "mov_rmse": {"suffix": "_mov_rmse", "label": "Mov RMSE (min)", "fmt": "{:.2f}"},
-    "mov_mpe": {"suffix": "_mov_mpe", "label": "Mov MPE %", "fmt": "{:.1f}"},
-    "mov_mape": {"suffix": "_mov_mape", "label": "Mov MAPE %", "fmt": "{:.1f}"},
 }
-
-# Metrics applicable to each time basis
-_WALLCLOCK_METRICS = {"mae", "rmse", "mpe", "mape"}
-_MOVING_METRICS = {"mov_mae", "mov_rmse", "mov_mpe", "mov_mape"}
 
 _INFO_COLS = [
     "ride",
@@ -221,18 +213,9 @@ def write_html_report(
             .to_html()
         )
 
-    # Partition estimators by time basis (T vs M) based on their key prefix
-    t_estimators = {ek for ek in col_to_name if ek.split("_")[1:2] == ["t"]}
-    m_estimators = {ek for ek in col_to_name if ek.split("_")[1:2] == ["m"]}
-
-    wc_metrics = [m for m in selected_metrics if m in _WALLCLOCK_METRICS]
-    mv_metrics = [m for m in selected_metrics if m in _MOVING_METRICS]
-
-    global_wc_html = _global_summary(
-        wc_metrics, t_estimators, "Wall-clock metrics (T estimators)"
-    )
-    global_mv_html = _global_summary(
-        mv_metrics, m_estimators, "Moving-time metrics (M estimators)"
+    all_estimators = set(col_to_name.keys())
+    global_html = _global_summary(
+        selected_metrics, all_estimators, "Moving-time metrics (paused rows excluded)"
     )
 
     # --- Per-ride tables: one table per metric ---
@@ -277,10 +260,8 @@ def write_html_report(
     # --- Write HTML ---
     output_path.parent.mkdir(parents=True, exist_ok=True)
     sections = []
-    if global_wc_html:
-        sections.extend(["<h2>Wall-clock metrics (T estimators)</h2>", global_wc_html])
-    if global_mv_html:
-        sections.extend(["<h2>Moving-time metrics (M estimators)</h2>", global_mv_html])
+    if global_html:
+        sections.extend(["<h2>Global summary</h2>", global_html])
     for html in per_ride_tables:
         sections.append(f"<h2>Per-ride</h2>{html}")
     for html in by_type_tables:
