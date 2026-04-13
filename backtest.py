@@ -8,28 +8,21 @@ from tqdm.contrib.concurrent import process_map
 
 from godot.benchmark import backtest, compute_metrics
 from godot.estimators import (
-    AdaptivePhysicsEstimator,
     AvgSpeedEstimator,
     AdaptiveGradientPriorEstimator,
     BinnedAdaptiveEstimator,
-    OracleTrustedBinnedEstimator,
     TrustedBinnedAdaptiveEstimator,
     WeightedGainVFlat,
-    NoisyOracleAdaptiveLerpEstimator,
-    OracleAdaptiveLerpEstimator,
     GradientPriorEstimator,
     PhysicsGradientPriorEstimator,
     RealisticPhysicsEstimator,
     realistic_physics_ratios,
-    EwmaLockVFlat,
-    MedianLockVFlat,
-    FlatSpeedVFlat,
-    PriorFreeVFlat,
-    PriorFreeEwmaVFlat,
     CalibratingPhysicsEstimator,
     PIPhysicsEstimator,
     IntegralPhysicsEstimator,
     SplitIntegralPhysicsEstimator,
+    VeryRealisticPhysicsEstimator,
+    VerySplitIntegralPhysicsEstimator,
 )
 from godot.pause import WallClockPause
 from godot.plot import (
@@ -202,6 +195,20 @@ ESTIMATORS = {
     ),
     "5_M_split_integral_physics": (
         SplitIntegralPhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+        ),
+        WallClockPause(),
+    ),
+    "5_M_very_realistic_prior": (
+        VeryRealisticPhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+        ),
+        WallClockPause(),
+    ),
+    "5_M_very_split_integral_physics": (
+        VerySplitIntegralPhysicsEstimator(
             mass_kg=TOTAL_SYSTEM_MASS,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),

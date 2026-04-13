@@ -1811,6 +1811,134 @@ def realistic_physics_ratios(
     return ratios
 
 
+def very_realistic_physics_ratios(
+    mass_kg: float,
+    v_flat_ms: float,
+    cda: float = 0.35,
+    crr: float = 0.005,
+    rho: float = 1.225,
+    headwind_ms: float = 2.22,
+    power_watts: float | None = None,
+    ftp_watts: float | None = None,
+    climb_effort: float = 0.5,
+    p_max_multiplier: float = 1.8,
+    descent_decay_k: float = 0.4,
+    grad_min_pct: int = -20,
+    grad_max_pct: int = 20,
+) -> dict[int, float]:
+    """Speed ratio per gradient from an FTP-aware power model.
+
+    Refines `realistic_physics_ratios` with three data-informed changes:
+
+    1. **Climb power ceiling** — sub-threshold climbs use effort scaling
+       (same as realistic), but power is capped at `P_max`. Default:
+       `1.2 * ftp_watts` if provided, else `p_max_multiplier * P_flat`.
+       Matches the empirical plateau around 1.7-2x P_flat at gradients
+       above ~4-6%.
+    2. **Exponential descent power decay** — replaces the linear power
+       reduction and freewheel cap with `P = P_flat * exp(-k * |g_pct|)`.
+       Fits the empirical curve: 95% at -1%, 55% at -3%, 25% at -5%,
+       ~0% by -10%. Smooth, no kinks.
+    3. **No freewheel speed cap** — the exponential decay alone produces
+       realistic descent speeds via the cubic solver.
+
+    Everything else matches `realistic_physics_ratios` (headwind in
+    solver, numerical cubic solver, same parameters).
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_ms : float
+        Reference flat-ground speed (m/s).
+    cda : float, optional
+        Drag area CdA (m**2). Default 0.35.
+    crr : float, optional
+        Rolling resistance coefficient. Default 0.005.
+    rho : float, optional
+        Air density (kg/m**3). Default 1.225.
+    headwind_ms : float, optional
+        Effective headwind (m/s). Default 2.22 (~8 km/h).
+    power_watts : float or None, optional
+        If provided, used as P_flat directly (skips headwind back-solve).
+    ftp_watts : float or None, optional
+        Rider's FTP (W). If provided, `P_max = 1.2 * ftp_watts`. Rider
+        can push briefly above FTP on climbs, so 1.2x captures the
+        observed climb ceiling.
+    climb_effort : float, optional
+        Fraction of extra power for constant-speed climbing (0-1).
+        Default 0.5.
+    p_max_multiplier : float, optional
+        Fallback ceiling as multiple of `P_flat` when `ftp_watts` is
+        not provided. Default 1.8 (matches empirical plateau).
+    descent_decay_k : float, optional
+        Exponential decay rate for descent power: `P = P_flat * exp(-k * |g_pct|)`.
+        Default 0.4 (fits empirical: ~55% at -3%, ~25% at -5%).
+    grad_min_pct, grad_max_pct : int, optional
+        Inclusive integer gradient range in percent. Default -20..20.
+
+    Returns
+    -------
+    dict[int, float]
+        Integer gradient (%) -> speed ratio relative to `v_flat_ms`.
+    """
+    g = 9.81
+    k_a = 0.5 * rho * cda
+
+    if power_watts is not None:
+        p_flat = float(power_watts)
+    else:
+        p_flat = (
+            k_a * (v_flat_ms + headwind_ms) ** 2 * v_flat_ms
+            + crr * mass_kg * g * v_flat_ms
+        )
+
+    if ftp_watts is not None:
+        p_max = 1.2 * float(ftp_watts)
+    else:
+        p_max = p_max_multiplier * p_flat
+
+    ratios: dict[int, float] = {}
+    for pct in range(grad_min_pct, grad_max_pct + 1):
+        theta = math.atan(pct / 100)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+
+        if pct > 0:
+            # Sub-threshold: effort scaling. Super-threshold: capped at p_max.
+            p_constant_speed = (
+                k_a * (v_flat_ms + headwind_ms) ** 2
+                + crr * mass_kg * g * cos_t
+                + mass_kg * g * sin_t
+            ) * v_flat_ms
+            p_sub = p_flat + climb_effort * (p_constant_speed - p_flat)
+            p_g = min(p_sub, p_max)
+        elif pct < 0:
+            # Exponential decay toward zero
+            p_g = p_flat * math.exp(-descent_decay_k * abs(pct))
+        else:
+            p_g = p_flat
+
+        # Solve cubic with headwind (same as realistic)
+        c3 = k_a
+        c2 = 2 * k_a * headwind_ms
+        c1 = k_a * headwind_ms**2 + mass_kg * g * (crr * cos_t + sin_t)
+        c0 = -p_g
+
+        if p_g <= 0 and c1 < 0:
+            disc = c2**2 - 4 * c3 * c1
+            v = (-c2 + math.sqrt(disc)) / (2 * c3) if disc >= 0 else 0.0
+        elif p_g <= 0:
+            v = 0.0
+        else:
+            roots = np.roots([c3, c2, c1, c0])
+            real_pos = [r.real for r in roots if abs(r.imag) < 1e-10 and r.real > 0]
+            v = max(real_pos) if real_pos else 0.0
+
+        ratios[pct] = v / v_flat_ms
+    return ratios
+
+
 class PhysicsGradientPriorEstimator(GradientPriorEstimator):
     """Gradient-aware ETA estimator with ratios from a constant-power model.
 
@@ -1955,6 +2083,101 @@ class RealisticPhysicsEstimator(GradientPriorEstimator):
             f"headwind_kmh={self._headwind_kmh!r}, "
             f"climb_effort={self._climb_effort!r}, "
             f"descent_confidence={self._descent_confidence!r})"
+        )
+
+
+class VeryRealisticPhysicsEstimator(GradientPriorEstimator):
+    """Gradient-aware ETA estimator with FTP-aware power model.
+
+    Builds speed ratios from `very_realistic_physics_ratios`. Refines
+    the realistic model with a climb power ceiling (sub-threshold
+    scaling capped at P_max, default 1.2*FTP or 1.8*P_flat), exponential
+    descent power decay, and no freewheel speed cap.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Assumed flat-ground speed (km/h).
+    headwind_kmh : float, optional
+        Effective headwind (km/h). Default 8.0.
+    power_watts : float or None, optional
+        If provided, used as P_flat directly.
+    ftp_watts : float or None, optional
+        Rider's FTP. `P_max = 1.2 * ftp_watts` when provided.
+    climb_effort : float, optional
+        Sub-threshold climb effort scaling (0-1). Default 0.5.
+    p_max_multiplier : float, optional
+        `P_max / P_flat` when no FTP. Default 1.8.
+    descent_decay_k : float, optional
+        Descent power decay rate. Default 0.4.
+    cda, crr, rho : float, optional
+        Aerodynamic and rolling resistance parameters.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+        headwind_kmh: float = 8.0,
+        power_watts: float | None = None,
+        ftp_watts: float | None = None,
+        climb_effort: float = 0.5,
+        p_max_multiplier: float = 1.8,
+        descent_decay_k: float = 0.4,
+        grad_min_pct: int = -20,
+        grad_max_pct: int = 20,
+    ) -> None:
+        ratios = very_realistic_physics_ratios(
+            mass_kg=mass_kg,
+            v_flat_ms=v_flat_kmh / 3.6,
+            cda=cda,
+            crr=crr,
+            rho=rho,
+            headwind_ms=headwind_kmh / 3.6,
+            power_watts=power_watts,
+            ftp_watts=ftp_watts,
+            climb_effort=climb_effort,
+            p_max_multiplier=p_max_multiplier,
+            descent_decay_k=descent_decay_k,
+            grad_min_pct=grad_min_pct,
+            grad_max_pct=grad_max_pct,
+        )
+        super().__init__(v_flat_kmh=v_flat_kmh, ratios=ratios)
+        self._mass_kg = mass_kg
+        self._cda = cda
+        self._crr = crr
+        self._rho = rho
+        self._headwind_kmh = headwind_kmh
+        self._ftp_watts = ftp_watts
+        self._climb_effort = climb_effort
+        self._p_max_multiplier = p_max_multiplier
+        self._descent_decay_k = descent_decay_k
+
+    def __str__(self) -> str:
+        ftp_str = (
+            f"FTP={self._ftp_watts:.0f}W"
+            if self._ftp_watts is not None
+            else f"P_max={self._p_max_multiplier}*P_flat"
+        )
+        return (
+            f"very realistic physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"m={self._mass_kg:.0f}kg, {ftp_str}, "
+            f"effort={self._climb_effort}, k={self._descent_decay_k})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"VeryRealisticPhysicsEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"ftp_watts={self._ftp_watts!r}, "
+            f"climb_effort={self._climb_effort!r}, "
+            f"p_max_multiplier={self._p_max_multiplier!r}, "
+            f"descent_decay_k={self._descent_decay_k!r})"
         )
 
 
@@ -2524,6 +2747,211 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         return (
             f"SplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={self._v_flat_ms * 3.6!r})"
+        )
+
+
+class VerySplitIntegralPhysicsEstimator(BaseEstimator):
+    """Split integral physics with the FTP-aware ratio model.
+
+    Identical to `SplitIntegralPhysicsEstimator` but uses
+    `very_realistic_physics_ratios` — climb power ceiling (FTP-based or
+    1.8*P_flat), exponential descent power decay, no freewheel cap.
+
+    Two integral corrections (climb and descent) absorb residual level
+    errors. The ratio shape is physics-informed from empirical power data.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Initial flat-ground speed guess (km/h).
+    headwind_kmh : float, optional
+        Effective headwind (km/h). Default 8.0.
+    power_watts : float or None, optional
+        If provided, used as P_flat directly.
+    ftp_watts : float or None, optional
+        Rider's FTP. `P_max = 1.2 * ftp_watts` when provided.
+    climb_effort : float, optional
+        Sub-threshold climb effort scaling (0-1). Default 0.5.
+    p_max_multiplier : float, optional
+        `P_max / P_flat` when no FTP. Default 1.8.
+    descent_decay_k : float, optional
+        Descent power decay rate. Default 0.4.
+    cda, crr, rho : float, optional
+        Aerodynamic and rolling resistance parameters.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+        headwind_kmh: float = 8.0,
+        power_watts: float | None = None,
+        ftp_watts: float | None = None,
+        climb_effort: float = 0.5,
+        p_max_multiplier: float = 1.8,
+        descent_decay_k: float = 0.4,
+    ) -> None:
+        self._v_flat_ms = v_flat_kmh / 3.6
+        self._ratios = very_realistic_physics_ratios(
+            mass_kg=mass_kg,
+            v_flat_ms=v_flat_kmh / 3.6,
+            cda=cda,
+            crr=crr,
+            rho=rho,
+            headwind_ms=headwind_kmh / 3.6,
+            power_watts=power_watts,
+            ftp_watts=ftp_watts,
+            climb_effort=climb_effort,
+            p_max_multiplier=p_max_multiplier,
+            descent_decay_k=descent_decay_k,
+        )
+        self._mass_kg = mass_kg
+        self._headwind_kmh = headwind_kmh
+        self._ftp_watts = ftp_watts
+        self._climb_effort = climb_effort
+        self._p_max_multiplier = p_max_multiplier
+        self._descent_decay_k = descent_decay_k
+
+    def _ratio_for(self, gradient_frac: float) -> float:
+        bin_pct = math.floor(gradient_frac * 100)
+        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
+        return self._ratios.get(bin_pct, 1.0)
+
+    def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        df = ride.df
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(self._ratios)
+        max_bin = max(self._ratios)
+        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+        grad_frac = gradients.values
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        climb_actual_t = 0.0
+        climb_predicted_t = 0.0
+        descent_actual_t = 0.0
+        descent_predicted_t = 0.0
+        integral_climb = 1.0
+        integral_descent = 1.0
+
+        climb_out = np.ones(len(df))
+        descent_out = np.ones(len(df))
+
+        for i in range(len(df)):
+            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
+                predicted_speed = self._v_flat_ms * row_ratios[i]
+                if predicted_speed > 0 and dd[i] > 0:
+                    pred_t = dd[i] / predicted_speed
+                    if grad_frac[i] >= 0:
+                        climb_actual_t += dt[i]
+                        climb_predicted_t += pred_t
+                        if climb_actual_t > 0:
+                            integral_climb = climb_predicted_t / climb_actual_t
+                    else:
+                        descent_actual_t += dt[i]
+                        descent_predicted_t += pred_t
+                        if descent_actual_t > 0:
+                            integral_descent = descent_predicted_t / descent_actual_t
+
+            climb_out[i] = integral_climb
+            descent_out[i] = integral_descent
+
+        return (
+            pd.Series(climb_out, index=df.index),
+            pd.Series(descent_out, index=df.index),
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        climb_int, descent_int = self._integrals(ride)
+        climb_arr = climb_int.values
+        descent_arr = descent_int.values
+
+        seg_starts = np.array([s.start_distance_m for s in segments])
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        seg_is_climb = np.array([s.gradient >= 0 for s in segments])
+
+        speeds = np.empty(len(distances))
+        for i in range(len(df)):
+            d = distances[i]
+            c_corr = climb_arr[i]
+            d_corr = descent_arr[i]
+
+            si = int(np.searchsorted(seg_ends, d, side="right"))
+            si = min(si, len(segments) - 1)
+
+            ttg = 0.0
+            for j in range(si, len(segments)):
+                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
+                s_len = seg_ends[j] - s_start
+                if s_len <= 0:
+                    continue
+                corr = c_corr if seg_is_climb[j] else d_corr
+                ttg += s_len / (self._v_flat_ms * seg_ratios[j] * corr)
+
+            remaining = total_dist - d
+            if ttg > 0 and remaining > 0:
+                speeds[i] = remaining / ttg
+            else:
+                speeds[i] = np.nan
+
+        return pd.Series(speeds, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        climb_int, descent_int = self._integrals(ride)
+        speed = np.array(
+            [
+                self._v_flat_ms
+                * self._ratio_for(segments[idx[i]].gradient)
+                * (
+                    climb_int.iloc[i]
+                    if segments[idx[i]].gradient >= 0
+                    else descent_int.iloc[i]
+                )
+                for i in range(len(df))
+            ]
+        )
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        ftp_str = (
+            f"FTP={self._ftp_watts:.0f}W"
+            if self._ftp_watts is not None
+            else f"P_max={self._p_max_multiplier}*P_flat"
+        )
+        return (
+            f"very-split-integral physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"m={self._mass_kg:.0f}kg, {ftp_str})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"VerySplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"ftp_watts={self._ftp_watts!r})"
         )
 
 
