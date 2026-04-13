@@ -28,6 +28,7 @@ from godot.estimators import (
     PriorFreeEwmaVFlat,
     CalibratingPhysicsEstimator,
     PIPhysicsEstimator,
+    IntegralPhysicsEstimator,
 )
 from godot.pause import WallClockPause
 from godot.plot import (
@@ -186,6 +187,13 @@ ESTIMATORS = {
     ),
     "5_M_pi_physics": (
         PIPhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+        ),
+        WallClockPause(),
+    ),
+    "5_M_integral_physics": (
+        IntegralPhysicsEstimator(
             mass_kg=TOTAL_SYSTEM_MASS,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),
