@@ -1186,6 +1186,111 @@ class MedianLockVFlat(VFlatEstimator):
         )
 
 
+class PriorFreeVFlat(VFlatEstimator):
+    """Prior-free v_flat estimator with ride-time-scaled skip period.
+
+    Uses ``v_flat_init_ms`` only to estimate total ride time (via the
+    route segments and gradient ratios), which sets the skip period.
+    During the skip the estimator returns ``v_flat_init_ms`` so the ETA
+    estimator falls back to the bare realistic prior. After the skip,
+    an expanding mean of ``v_actual / ratio[gradient]`` takes over —
+    no EWMA, no prior contamination.
+
+    Designed for use with `realistic_physics_ratios` where the gradient
+    ratios are accurate enough that every observation yields a usable
+    v_flat signal. The ETA estimator's own correction layers handle
+    short-term deviations.
+
+    Parameters
+    ----------
+    skip_fraction : float
+        Fraction of estimated ride time to skip before accumulating.
+        Default 0.01 (1%).
+    min_skip_s : float
+        Floor on skip period (moving seconds). Default 20.
+    max_skip_s : float
+        Ceiling on skip period (moving seconds). Default 300 (5 min).
+    """
+
+    def __init__(
+        self,
+        skip_fraction: float = 0.01,
+        min_skip_s: float = 20.0,
+        max_skip_s: float = 300.0,
+    ) -> None:
+        self._skip_fraction = skip_fraction
+        self._min_skip_s = min_skip_s
+        self._max_skip_s = max_skip_s
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(ratios)
+        max_bin = max(ratios)
+        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        row_ratios = np.array([ratios.get(g, 1.0) for g in grad_pct])
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+
+        # Estimate ride time to scale skip period
+        _, segments = decimate_to_gradient_segments(df)
+        est_time_s = sum(
+            (s.end_distance_m - s.start_distance_m)
+            / max(
+                0.5,
+                v_flat_init_ms
+                * ratios.get(
+                    max(min_bin, min(max_bin, math.floor(s.gradient * 100))),
+                    1.0,
+                ),
+            )
+            for s in segments
+        )
+        skip_s = max(
+            self._min_skip_s,
+            min(self._max_skip_s, self._skip_fraction * est_time_s),
+        )
+
+        elapsed_moving = 0.0
+        cum_sum = 0.0
+        count = 0
+        v_flat = v_flat_init_ms
+        result = np.empty(len(df))
+
+        for i in range(len(df)):
+            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
+                elapsed_moving += dt[i]
+                if elapsed_moving > skip_s:
+                    cum_sum += speed[i] / row_ratios[i]
+                    count += 1
+                    v_flat = cum_sum / count
+
+            result[i] = v_flat
+
+        return pd.Series(result, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"prior-free(skip={self._skip_fraction:.0%}, "
+            f"[{self._min_skip_s:.0f}-{self._max_skip_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PriorFreeVFlat(skip_fraction={self._skip_fraction!r}, "
+            f"min_skip_s={self._min_skip_s!r}, "
+            f"max_skip_s={self._max_skip_s!r})"
+        )
+
+
 class AdaptiveGradientPriorEstimator(BaseEstimator):
     """Gradient-aware ETA estimator with adaptive v_flat.
 
@@ -1463,6 +1568,132 @@ def physics_gradient_ratios(
     return ratios
 
 
+def realistic_physics_ratios(
+    mass_kg: float,
+    v_flat_ms: float,
+    cda: float = 0.35,
+    crr: float = 0.005,
+    rho: float = 1.225,
+    headwind_ms: float = 2.22,
+    power_watts: float | None = None,
+    climb_effort: float = 0.5,
+    descent_confidence: float = 0.65,
+    grad_min_pct: int = -20,
+    grad_max_pct: int = 20,
+) -> dict[int, float]:
+    """Speed ratio per gradient from a realistic power model.
+
+    Improves on `physics_gradient_ratios` with three corrections:
+
+    1. **Headwind-corrected P_flat** — back-solves rider power assuming
+       an effective headwind, giving a realistic wattage. If `power_watts`
+       is provided directly, uses that instead.
+    2. **Gradient-dependent power** — on climbs, rider pushes harder
+       (interpolated by `climb_effort`); on descents, rider backs off
+       proportional to gravity's contribution (scaled by
+       `descent_confidence`).
+    3. **Freewheel descent cap** — caps descent speed at
+       `v_flat + descent_confidence * (v_freewheel - v_flat)` when the
+       gravity-only terminal velocity exceeds v_flat (Nee & Herterich
+       2022).
+
+    The headwind also enters the per-gradient solver, so drag on descents
+    is realistic rather than zero-wind.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_ms : float
+        Reference flat-ground speed (m/s).
+    cda : float, optional
+        Drag area CdA (m**2). Default 0.35.
+    crr : float, optional
+        Rolling resistance coefficient. Default 0.005.
+    rho : float, optional
+        Air density (kg/m**3). Default 1.225.
+    headwind_ms : float, optional
+        Effective headwind (m/s). Default 2.22 (~8 km/h).
+    power_watts : float or None, optional
+        If provided, used as P_flat directly (skips headwind back-solve).
+    climb_effort : float, optional
+        Fraction of extra power for constant-speed climbing (0-1).
+        Default 0.5.
+    descent_confidence : float, optional
+        Rider descent confidence (0-1). Controls both power reduction on
+        descents and freewheel speed cap. Default 0.65.
+    grad_min_pct, grad_max_pct : int, optional
+        Inclusive integer gradient range in percent. Default -20..20.
+
+    Returns
+    -------
+    dict[int, float]
+        Integer gradient (%) -> speed ratio relative to `v_flat_ms`.
+    """
+    g = 9.81
+    k_a = 0.5 * rho * cda
+
+    # --- P_flat: headwind-corrected or user-provided ---
+    if power_watts is not None:
+        p_flat = float(power_watts)
+    else:
+        p_flat = (
+            k_a * (v_flat_ms + headwind_ms) ** 2 * v_flat_ms
+            + crr * mass_kg * g * v_flat_ms
+        )
+
+    ratios: dict[int, float] = {}
+    for pct in range(grad_min_pct, grad_max_pct + 1):
+        theta = math.atan(pct / 100)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+
+        # --- Gradient-dependent power ---
+        if pct > 0:
+            # Climb: rider pushes harder
+            p_constant_speed = (
+                k_a * (v_flat_ms + headwind_ms) ** 2
+                + crr * mass_kg * g * cos_t
+                + mass_kg * g * sin_t
+            ) * v_flat_ms
+            p_g = p_flat + climb_effort * (p_constant_speed - p_flat)
+        elif pct < 0:
+            # Descent: rider backs off proportional to gravity
+            p_grav = mass_kg * g * abs(sin_t) * v_flat_ms
+            p_g = max(0.0, p_flat - (1 - descent_confidence) * p_grav)
+        else:
+            p_g = p_flat
+
+        # --- Solve cubic with headwind ---
+        # k_a*v³ + 2*k_a*v_wind*v² + (k_a*v_wind² + m*g*(Crr*cos+sin))*v - P = 0
+        c3 = k_a
+        c2 = 2 * k_a * headwind_ms
+        c1 = k_a * headwind_ms**2 + mass_kg * g * (crr * cos_t + sin_t)
+        c0 = -p_g
+
+        if p_g <= 0 and c1 < 0:
+            # Terminal velocity with zero power: solve quadratic
+            # c3*v² + c2*v + c1 = 0  (after factoring out v)
+            disc = c2**2 - 4 * c3 * c1
+            v = (-c2 + math.sqrt(disc)) / (2 * c3) if disc >= 0 else 0.0
+        elif p_g <= 0:
+            v = 0.0
+        else:
+            roots = np.roots([c3, c2, c1, c0])
+            real_pos = [r.real for r in roots if abs(r.imag) < 1e-10 and r.real > 0]
+            v = max(real_pos) if real_pos else 0.0
+
+        # --- Freewheel cap on descents ---
+        if pct < 0:
+            v_freewheel = math.sqrt(2 * mass_kg * g * abs(sin_t) / (rho * cda))
+            if v_freewheel > v_flat_ms:
+                v_cap = v_flat_ms + descent_confidence * (v_freewheel - v_flat_ms)
+                v = min(v, v_cap)
+
+        ratios[pct] = v / v_flat_ms
+    return ratios
+
+
 class PhysicsGradientPriorEstimator(GradientPriorEstimator):
     """Gradient-aware ETA estimator with ratios from a constant-power model.
 
@@ -1527,6 +1758,86 @@ class PhysicsGradientPriorEstimator(GradientPriorEstimator):
             f"PhysicsGradientPriorEstimator(mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={self._v_flat_ms * 3.6!r}, cda={self._cda!r}, "
             f"crr={self._crr!r}, rho={self._rho!r})"
+        )
+
+
+class RealisticPhysicsEstimator(GradientPriorEstimator):
+    """Gradient-aware ETA estimator with a realistic power model.
+
+    Builds speed ratios from `realistic_physics_ratios` which adds headwind
+    correction, gradient-dependent power (climb effort + descent backing-off),
+    and a freewheel descent speed cap. Delegates to `GradientPriorEstimator`
+    for forward-looking time-to-go.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Assumed flat-ground speed (km/h).
+    headwind_kmh : float, optional
+        Effective headwind (km/h). Default 8.0.
+    power_watts : float or None, optional
+        If provided, used as P_flat directly.
+    climb_effort : float, optional
+        Fraction of extra power for constant-speed climbing (0-1).
+        Default 0.5.
+    descent_confidence : float, optional
+        Rider descent confidence (0-1). Default 0.65.
+    cda, crr, rho : float, optional
+        Aerodynamic and rolling resistance parameters.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+        headwind_kmh: float = 8.0,
+        power_watts: float | None = None,
+        climb_effort: float = 0.5,
+        descent_confidence: float = 0.65,
+        grad_min_pct: int = -20,
+        grad_max_pct: int = 20,
+    ) -> None:
+        ratios = realistic_physics_ratios(
+            mass_kg=mass_kg,
+            v_flat_ms=v_flat_kmh / 3.6,
+            cda=cda,
+            crr=crr,
+            rho=rho,
+            headwind_ms=headwind_kmh / 3.6,
+            power_watts=power_watts,
+            climb_effort=climb_effort,
+            descent_confidence=descent_confidence,
+            grad_min_pct=grad_min_pct,
+            grad_max_pct=grad_max_pct,
+        )
+        super().__init__(v_flat_kmh=v_flat_kmh, ratios=ratios)
+        self._mass_kg = mass_kg
+        self._cda = cda
+        self._crr = crr
+        self._rho = rho
+        self._headwind_kmh = headwind_kmh
+        self._climb_effort = climb_effort
+        self._descent_confidence = descent_confidence
+
+    def __str__(self) -> str:
+        return (
+            f"realistic physics prior ({self._v_flat_ms * 3.6:.1f} km/h flat, "
+            f"m={self._mass_kg:.0f}kg, wind={self._headwind_kmh:.0f}km/h, "
+            f"effort={self._climb_effort}, conf={self._descent_confidence})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"RealisticPhysicsEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"headwind_kmh={self._headwind_kmh!r}, "
+            f"climb_effort={self._climb_effort!r}, "
+            f"descent_confidence={self._descent_confidence!r})"
         )
 
 

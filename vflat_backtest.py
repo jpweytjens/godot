@@ -16,6 +16,7 @@ from godot.estimators import (
     VFlatEstimator,
     WeightedGainVFlat,
     _row_gradients,
+    realistic_physics_ratios,
 )
 from godot.ride import load_ride
 
@@ -23,15 +24,27 @@ from godot.ride import load_ride
 _ratio_df = pd.read_parquet(Path("data/gradient_ratios.parquet"))
 GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
 GLOBAL_PRIOR_KMH = 28.8
+TOTAL_SYSTEM_MASS = 85 + 10
+REALISTIC_RATIOS: dict[int, float] = realistic_physics_ratios(
+    mass_kg=TOTAL_SYSTEM_MASS,
+    v_flat_ms=GLOBAL_PRIOR_KMH / 3.6,
+)
 
-ESTIMATORS: dict[str, VFlatEstimator] = {
-    "Oracle": OracleVFlat(),
-    "Flat speed (2%)": FlatSpeedVFlat(max_grad=0.02),
-    "Flat speed (5%)": FlatSpeedVFlat(max_grad=0.05),
-    "Weighted gain (default)": WeightedGainVFlat(),
-    "EWMA lock": EwmaLockVFlat(),
-    "Median lock": MedianLockVFlat(),
-}
+# Each entry: (name, estimator, ratios_dict)
+ESTIMATORS: list[tuple[str, VFlatEstimator, dict[int, float]]] = [
+    ("Oracle", OracleVFlat(), GRADIENT_RATIOS),
+    ("Flat speed (2%)", FlatSpeedVFlat(max_grad=0.02), GRADIENT_RATIOS),
+    ("Flat speed (5%)", FlatSpeedVFlat(max_grad=0.05), GRADIENT_RATIOS),
+    ("Weighted gain", WeightedGainVFlat(), GRADIENT_RATIOS),
+    ("EWMA lock", EwmaLockVFlat(), GRADIENT_RATIOS),
+    ("Median lock", MedianLockVFlat(), GRADIENT_RATIOS),
+    # Realistic ratios
+    ("Flat speed (2%) [R]", FlatSpeedVFlat(max_grad=0.02), REALISTIC_RATIOS),
+    ("Flat speed (5%) [R]", FlatSpeedVFlat(max_grad=0.05), REALISTIC_RATIOS),
+    ("Weighted gain [R]", WeightedGainVFlat(), REALISTIC_RATIOS),
+    ("EWMA lock [R]", EwmaLockVFlat(), REALISTIC_RATIOS),
+    ("Median lock [R]", MedianLockVFlat(), REALISTIC_RATIOS),
+]
 
 # Checkpoints in moving minutes
 CHECKPOINTS_MIN = [2, 5, 10, 20, 30]
@@ -75,10 +88,8 @@ def run_one(gpx_path: Path) -> list[dict]:
     cum_moving_s = (moving.astype(float) * df["delta_time"]).cumsum()
 
     rows = []
-    for est_name, estimator in ESTIMATORS.items():
-        v_flat_series = estimator.estimate(
-            ride, GRADIENT_RATIOS, GLOBAL_PRIOR_KMH / 3.6
-        )
+    for est_name, estimator, ratios in ESTIMATORS:
+        v_flat_series = estimator.estimate(ride, ratios, GLOBAL_PRIOR_KMH / 3.6)
         v_flat_kmh = v_flat_series * 3.6
 
         final_vflat = v_flat_kmh.iloc[-1]

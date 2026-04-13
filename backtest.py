@@ -20,6 +20,12 @@ from godot.estimators import (
     OracleAdaptiveLerpEstimator,
     GradientPriorEstimator,
     PhysicsGradientPriorEstimator,
+    RealisticPhysicsEstimator,
+    realistic_physics_ratios,
+    EwmaLockVFlat,
+    MedianLockVFlat,
+    FlatSpeedVFlat,
+    PriorFreeVFlat,
 )
 from godot.pause import NoPause, WallClockPause
 from godot.plot import (
@@ -51,6 +57,10 @@ _ratio_df = pd.read_parquet(Path("data/gradient_ratios.parquet"))
 GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
 GLOBAL_PRIOR_KMH = 28.8  # tunable flat-ground speed
 TOTAL_SYSTEM_MASS = 85 + 10  # rider + bike, for physics-based estimators
+REALISTIC_RATIOS: dict[int, float] = realistic_physics_ratios(
+    mass_kg=TOTAL_SYSTEM_MASS,
+    v_flat_ms=GLOBAL_PRIOR_KMH / 3.6,
+)
 
 
 def _time_basis(name: str) -> str:
@@ -166,6 +176,64 @@ ESTIMATORS = {
                 mass_kg=TOTAL_SYSTEM_MASS,
                 v_flat_kmh=GLOBAL_PRIOR_KMH,
             ),
+        ),
+        WallClockPause(),
+    ),
+    # --- Level 5: realistic physics prior ---
+    "1_M_global_realistic_prior": (
+        RealisticPhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+        ),
+        WallClockPause(),
+    ),
+    "5_M_global_realistic_trusted": (
+        TrustedBinnedAdaptiveEstimator(
+            prior=RealisticPhysicsEstimator(
+                mass_kg=TOTAL_SYSTEM_MASS,
+                v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ),
+        ),
+        WallClockPause(),
+    ),
+    # --- Level 2 realistic: adaptive v_flat with realistic ratios ---
+    "2_M_wgain_realistic_adaptive_vflat": (
+        AdaptiveGradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ratios=REALISTIC_RATIOS,
+            vflat_estimator=WeightedGainVFlat(),
+        ),
+        WallClockPause(),
+    ),
+    "2_M_flatspeed_realistic_adaptive_vflat": (
+        AdaptiveGradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ratios=REALISTIC_RATIOS,
+            vflat_estimator=FlatSpeedVFlat(),
+        ),
+        WallClockPause(),
+    ),
+    "2_M_ewmalock_realistic_adaptive_vflat": (
+        AdaptiveGradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ratios=REALISTIC_RATIOS,
+            vflat_estimator=EwmaLockVFlat(),
+        ),
+        WallClockPause(),
+    ),
+    "2_M_medianlock_realistic_adaptive_vflat": (
+        AdaptiveGradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ratios=REALISTIC_RATIOS,
+            vflat_estimator=MedianLockVFlat(),
+        ),
+        WallClockPause(),
+    ),
+    "2_M_priorfree_realistic_adaptive_vflat": (
+        AdaptiveGradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ratios=REALISTIC_RATIOS,
+            vflat_estimator=PriorFreeVFlat(),
         ),
         WallClockPause(),
     ),
