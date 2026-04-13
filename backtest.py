@@ -8,7 +8,6 @@ from tqdm.contrib.concurrent import process_map
 
 from godot.benchmark import backtest, compute_metrics
 from godot.estimators import (
-    AdaptiveLerpSpeedEstimator,
     AdaptivePhysicsEstimator,
     AvgSpeedEstimator,
     AdaptiveGradientPriorEstimator,
@@ -29,7 +28,7 @@ from godot.estimators import (
     PriorFreeEwmaVFlat,
     CalibratingPhysicsEstimator,
 )
-from godot.pause import NoPause, WallClockPause
+from godot.pause import WallClockPause
 from godot.plot import (
     X_ELAPSED,
     _end_labels,
@@ -48,9 +47,7 @@ from godot.theme import TOL_VIBRANT
 from godot.ride import load_ride
 from godot.theme import TOL_BRIGHT
 
-REF_TOTAL = "0_T_avg_speed"
 REF_MOVING = "0_M_avg_speed"
-REF_TOTAL_COLOR = TOL_BRIGHT[3]  # yellow
 REF_MOVING_COLOR = TOL_BRIGHT[4]  # cyan
 REF_OPACITY = 0.7
 
@@ -65,41 +62,21 @@ REALISTIC_RATIOS: dict[int, float] = realistic_physics_ratios(
 )
 
 
-def _time_basis(name: str) -> str:
-    """Extract time basis ('T' or 'M') from estimator name."""
-    parts = name.split("_")
-    return parts[1].upper() if len(parts) >= 2 else "T"
-
-
-# Estimator naming convention: {level}_{T|M}_{prior}_{name}
-#   level: 0-4 (complexity / correction layers)
-#   T|M:   Total time (NoPause) or Moving time (WallClockPause)
+# Estimator naming convention: {level}_M_{prior}_{name}
+#   level: 0-5 (complexity / correction layers)
+#   M:     Moving time — all estimators use WallClockPause
 #   prior: global (fixed), oracle, or estimator name (e.g. wgain)
 #   name:  descriptive correction layer
 ESTIMATORS = {
     # --- Level 0: no gradient awareness ---
-    "0_T_avg_speed": (
-        AvgSpeedEstimator(moving_only=False),
-        NoPause(),
-    ),
     "0_M_avg_speed": (
         AvgSpeedEstimator(moving_only=True),
         WallClockPause(),
     ),
-    "0_T_adaptive_lerp": (
-        AdaptiveLerpSpeedEstimator(
-            prior_ms=28.8 / 3.6,
-            tau=60 * 60,
-            k=0.5,
-            fast_span_s=3600,
-            fast_weight=0.25,
-        ),
-        NoPause(),
-    ),
     # --- Level 1: gradient prior only (no online correction) ---
-    "1_T_global_empirical_prior": (
+    "1_M_global_empirical_prior": (
         GradientPriorEstimator(v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS),
-        NoPause(),
+        WallClockPause(),
     ),
     "1_M_global_physics_prior": (
         PhysicsGradientPriorEstimator(
@@ -109,13 +86,13 @@ ESTIMATORS = {
         WallClockPause(),
     ),
     # --- Level 2: + slow EWMA or adaptive v_flat ---
-    "2_T_wgain_empirical_adaptive_vflat": (
+    "2_M_wgain_empirical_adaptive_vflat": (
         AdaptiveGradientPriorEstimator(
             v_flat_kmh=GLOBAL_PRIOR_KMH,
             ratios=GRADIENT_RATIOS,
             vflat_estimator=WeightedGainVFlat(),
         ),
-        NoPause(),
+        WallClockPause(),
     ),
     "2_M_global_physics_slow_cal": (
         AdaptivePhysicsEstimator(
@@ -126,14 +103,14 @@ ESTIMATORS = {
         WallClockPause(),
     ),
     # --- Level 3: + per-bin fast EWMA ---
-    "3_T_global_empirical_binned": (
+    "3_M_global_empirical_binned": (
         BinnedAdaptiveEstimator(
             prior=GradientPriorEstimator(
                 v_flat_kmh=GLOBAL_PRIOR_KMH,
                 ratios=GRADIENT_RATIOS,
             ),
         ),
-        NoPause(),
+        WallClockPause(),
     ),
     "3_M_global_physics_binned": (
         BinnedAdaptiveEstimator(
@@ -145,14 +122,14 @@ ESTIMATORS = {
         WallClockPause(),
     ),
     # --- Level 4: + trust ramp + clamping ---
-    "4_T_global_empirical_trusted": (
+    "4_M_global_empirical_trusted": (
         TrustedBinnedAdaptiveEstimator(
             prior=GradientPriorEstimator(
                 v_flat_kmh=GLOBAL_PRIOR_KMH,
                 ratios=GRADIENT_RATIOS,
             ),
         ),
-        NoPause(),
+        WallClockPause(),
     ),
     "4_M_global_physics_trusted": (
         TrustedBinnedAdaptiveEstimator(
@@ -163,14 +140,14 @@ ESTIMATORS = {
         ),
         WallClockPause(),
     ),
-    "4_T_oracle_empirical_trusted": (
+    "4_M_oracle_empirical_trusted": (
         OracleTrustedBinnedEstimator(
             prior=GradientPriorEstimator(
                 v_flat_kmh=GLOBAL_PRIOR_KMH,
                 ratios=GRADIENT_RATIOS,
             ),
         ),
-        NoPause(),
+        WallClockPause(),
     ),
     "4_M_oracle_physics_trusted": (
         OracleTrustedBinnedEstimator(
@@ -308,13 +285,7 @@ def run(
         ride_prepped = downsample_for_plot(prep_time_axis(ride.df, warmup_pct=0.02))
         pause_df = _pause_intervals(ride_prepped)
 
-        # Reference results: total (yellow) and moving (cyan)
-        ref_total = results.get(REF_TOTAL)
-        ref_total_prepped = (
-            downsample_for_plot(prep_time_axis(ref_total, warmup_pct=0.02))
-            if ref_total is not None
-            else None
-        )
+        # Reference result: moving avg speed (cyan)
         ref_moving = results.get(REF_MOVING)
         ref_moving_prepped = (
             downsample_for_plot(prep_time_axis(ref_moving, warmup_pct=0.02))
@@ -327,16 +298,13 @@ def run(
             result_prepped = downsample_for_plot(
                 prep_time_axis(result, warmup_pct=0.02)
             )
-            is_ref = name in (REF_TOTAL, REF_MOVING)
+            is_ref = name == REF_MOVING
 
-            # Select delta columns based on time basis
-            is_moving = _time_basis(name) == "M"
-            delta_col = "delta_moving_s" if is_moving else "delta_s"
-            ata_col = "ata_moving_s" if is_moving else "ata_remaining_s"
-            err_title = (
-                "ETA \u2212 moving ATA (min)" if is_moving else "ETA \u2212 ATA (min)"
-            )
-            pct_title = "Moving ETA error (%)" if is_moving else "ETA error (%)"
+            # All estimators use moving-time basis
+            delta_col = "delta_moving_s"
+            ata_col = "ata_moving_s"
+            err_title = "ETA \u2212 moving ATA (min)"
+            pct_title = "Moving ETA error (%)"
 
             # Build combined error DataFrames with series column
             def _build_error_frames(delta_c, ata_c):
@@ -348,7 +316,6 @@ def run(
                 widths = []
                 if not is_ref:
                     for ref_prep, ref_color, ref_name in [
-                        (ref_total_prepped, REF_TOTAL_COLOR, "Avg total"),
                         (ref_moving_prepped, REF_MOVING_COLOR, "Avg moving"),
                     ]:
                         if ref_prep is not None:
@@ -453,7 +420,6 @@ def run(
                 pause_bands(ride_prepped, pause_df=pause_df),
                 avg_speed_overview(
                     ride_prepped,
-                    ref_total_df=ref_total_prepped,
                     ref_moving_df=ref_moving_prepped,
                 ),
             ).properties(width=chart_width, height=chart_height)
@@ -511,21 +477,11 @@ def run(
     warmup_m = ride.distance * 0.02
     for name, result in results.items():
         col = name.lower().replace(" ", "_")
-        basis = _time_basis(name)
-        if basis == "T":
-            # Wall-clock metrics (vs total remaining time)
-            wc = compute_metrics(result, warmup_m, moving_only=False)
-            row[f"{col}_mae"] = wc["mae_min"]
-            row[f"{col}_rmse"] = wc["rmse_min"]
-            row[f"{col}_mpe"] = wc["mpe_pct"]
-            row[f"{col}_mape"] = wc["mape_pct"]
-        else:
-            # Moving-time metrics (vs remaining moving time)
-            mv = compute_metrics(result, warmup_m, moving_only=True)
-            row[f"{col}_mov_mae"] = mv["mae_min"]
-            row[f"{col}_mov_rmse"] = mv["rmse_min"]
-            row[f"{col}_mov_mpe"] = mv["mpe_pct"]
-            row[f"{col}_mov_mape"] = mv["mape_pct"]
+        mv = compute_metrics(result, warmup_m, moving_only=True)
+        row[f"{col}_mae"] = mv["mae_min"]
+        row[f"{col}_rmse"] = mv["rmse_min"]
+        row[f"{col}_mpe"] = mv["mpe_pct"]
+        row[f"{col}_mape"] = mv["mape_pct"]
     return row
 
 
