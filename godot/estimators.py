@@ -2334,6 +2334,199 @@ class IntegralPhysicsEstimator(BaseEstimator):
         )
 
 
+class SplitIntegralPhysicsEstimator(BaseEstimator):
+    """Gradient-aware ETA with separate climb/descent integral corrections.
+
+    Like `IntegralPhysicsEstimator` but tracks two correction factors:
+    one for climb segments (gradient >= 0) and one for descent segments
+    (gradient < 0). This captures the asymmetric ratio bias from
+    different physics (climb_effort vs descent_confidence) without
+    per-bin noise.
+
+    On flat routes both integrals converge to the same value and the
+    estimator behaves like the single-integral version. On hilly routes
+    the split corrects climb and descent predictions independently.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Initial flat-ground speed guess (km/h).
+    cda, crr, rho : float, optional
+        Aerodynamic and rolling resistance parameters.
+    headwind_kmh : float, optional
+        Effective headwind (km/h). Default 8.0.
+    power_watts : float or None, optional
+        If provided, used as P_flat directly.
+    climb_effort : float, optional
+        Fraction of extra power for constant-speed climbing. Default 0.5.
+    descent_confidence : float, optional
+        Rider descent confidence (0-1). Default 0.65.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+        headwind_kmh: float = 8.0,
+        power_watts: float | None = None,
+        climb_effort: float = 0.5,
+        descent_confidence: float = 0.65,
+    ) -> None:
+        self._v_flat_ms = v_flat_kmh / 3.6
+        self._ratios = realistic_physics_ratios(
+            mass_kg=mass_kg,
+            v_flat_ms=v_flat_kmh / 3.6,
+            cda=cda,
+            crr=crr,
+            rho=rho,
+            headwind_ms=headwind_kmh / 3.6,
+            power_watts=power_watts,
+            climb_effort=climb_effort,
+            descent_confidence=descent_confidence,
+        )
+        self._mass_kg = mass_kg
+        self._headwind_kmh = headwind_kmh
+        self._climb_effort = climb_effort
+        self._descent_confidence = descent_confidence
+
+    def _ratio_for(self, gradient_frac: float) -> float:
+        bin_pct = math.floor(gradient_frac * 100)
+        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
+        return self._ratios.get(bin_pct, 1.0)
+
+    def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        """Cumulative predicted/actual time corrections for climb and descent."""
+        df = ride.df
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(self._ratios)
+        max_bin = max(self._ratios)
+        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+        grad_frac = gradients.values
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        climb_actual_t = 0.0
+        climb_predicted_t = 0.0
+        descent_actual_t = 0.0
+        descent_predicted_t = 0.0
+        integral_climb = 1.0
+        integral_descent = 1.0
+
+        climb_out = np.ones(len(df))
+        descent_out = np.ones(len(df))
+
+        for i in range(len(df)):
+            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
+                predicted_speed = self._v_flat_ms * row_ratios[i]
+                if predicted_speed > 0 and dd[i] > 0:
+                    pred_t = dd[i] / predicted_speed
+                    if grad_frac[i] >= 0:
+                        climb_actual_t += dt[i]
+                        climb_predicted_t += pred_t
+                        if climb_actual_t > 0:
+                            integral_climb = climb_predicted_t / climb_actual_t
+                    else:
+                        descent_actual_t += dt[i]
+                        descent_predicted_t += pred_t
+                        if descent_actual_t > 0:
+                            integral_descent = descent_predicted_t / descent_actual_t
+
+            climb_out[i] = integral_climb
+            descent_out[i] = integral_descent
+
+        return (
+            pd.Series(climb_out, index=df.index),
+            pd.Series(descent_out, index=df.index),
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        climb_int, descent_int = self._integrals(ride)
+        climb_arr = climb_int.values
+        descent_arr = descent_int.values
+
+        seg_starts = np.array([s.start_distance_m for s in segments])
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        seg_is_climb = np.array([s.gradient >= 0 for s in segments])
+
+        speeds = np.empty(len(distances))
+        for i in range(len(df)):
+            d = distances[i]
+            c_corr = climb_arr[i]
+            d_corr = descent_arr[i]
+
+            si = int(np.searchsorted(seg_ends, d, side="right"))
+            si = min(si, len(segments) - 1)
+
+            ttg = 0.0
+            for j in range(si, len(segments)):
+                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
+                s_len = seg_ends[j] - s_start
+                if s_len <= 0:
+                    continue
+                corr = c_corr if seg_is_climb[j] else d_corr
+                ttg += s_len / (self._v_flat_ms * seg_ratios[j] * corr)
+
+            remaining = total_dist - d
+            if ttg > 0 and remaining > 0:
+                speeds[i] = remaining / ttg
+            else:
+                speeds[i] = np.nan
+
+        return pd.Series(speeds, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        climb_int, descent_int = self._integrals(ride)
+        speed = np.array(
+            [
+                self._v_flat_ms
+                * self._ratio_for(segments[idx[i]].gradient)
+                * (
+                    climb_int.iloc[i]
+                    if segments[idx[i]].gradient >= 0
+                    else descent_int.iloc[i]
+                )
+                for i in range(len(df))
+            ]
+        )
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"split-integral physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"m={self._mass_kg:.0f}kg)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"SplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={self._v_flat_ms * 3.6!r})"
+        )
+
+
 class PIPhysicsEstimator(BaseEstimator):
     """Physics ETA estimator with PI (proportional-integral) calibration.
 
