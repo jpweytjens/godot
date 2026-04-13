@@ -27,6 +27,7 @@ from godot.estimators import (
     FlatSpeedVFlat,
     PriorFreeVFlat,
     PriorFreeEwmaVFlat,
+    CalibratingPhysicsEstimator,
 )
 from godot.pause import NoPause, WallClockPause
 from godot.plot import (
@@ -243,6 +244,14 @@ ESTIMATORS = {
             v_flat_kmh=GLOBAL_PRIOR_KMH,
             ratios=REALISTIC_RATIOS,
             vflat_estimator=PriorFreeEwmaVFlat(),
+        ),
+        WallClockPause(),
+    ),
+    # --- Calibrating physics: self-contained realistic + EWMA v_flat ---
+    "5_M_calibrating_physics": (
+        CalibratingPhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),
         WallClockPause(),
     ),

@@ -1958,6 +1958,215 @@ class RealisticPhysicsEstimator(GradientPriorEstimator):
         )
 
 
+class CalibratingPhysicsEstimator(BaseEstimator):
+    """Self-calibrating physics ETA estimator.
+
+    Combines the realistic physics gradient ratios with an inline EWMA
+    v_flat calibration. During a short skip period (scaled to estimated
+    ride time) the estimator uses the initial v_flat prior. After the
+    skip, v_flat is learned from observations via ``v_actual /
+    ratio[gradient]`` with an EWMA whose span scales with ride time.
+
+    No per-gradient-bin corrections — the realistic ratios are trusted
+    as-is. The only adaptive parameter is the scalar v_flat, which
+    tracks slow drift (fatigue, pacing changes).
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Initial flat-ground speed guess (km/h). Used for the prior
+        during the skip period and to estimate ride time.
+    skip_fraction : float
+        Fraction of estimated ride time to skip before calibrating.
+        Default 0.01 (1%).
+    ewma_fraction : float
+        EWMA span as fraction of estimated ride time. Default 0.10.
+    min_skip_s, max_skip_s : float
+        Bounds on skip period (moving seconds). Default 20-300.
+    min_ewma_span_s, max_ewma_span_s : float
+        Bounds on EWMA span (seconds). Default 120-3600.
+    cda, crr, rho : float, optional
+        Aerodynamic and rolling resistance parameters.
+    headwind_kmh : float, optional
+        Effective headwind (km/h). Default 8.0.
+    power_watts : float or None, optional
+        If provided, used as P_flat directly.
+    climb_effort : float, optional
+        Fraction of extra power for constant-speed climbing. Default 0.5.
+    descent_confidence : float, optional
+        Rider descent confidence (0-1). Default 0.65.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        skip_fraction: float = 0.01,
+        ewma_fraction: float = 0.10,
+        min_skip_s: float = 20.0,
+        max_skip_s: float = 300.0,
+        min_ewma_span_s: float = 120.0,
+        max_ewma_span_s: float = 3600.0,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+        headwind_kmh: float = 8.0,
+        power_watts: float | None = None,
+        climb_effort: float = 0.5,
+        descent_confidence: float = 0.65,
+    ) -> None:
+        self._v_flat_init_ms = v_flat_kmh / 3.6
+        self._ratios = realistic_physics_ratios(
+            mass_kg=mass_kg,
+            v_flat_ms=v_flat_kmh / 3.6,
+            cda=cda,
+            crr=crr,
+            rho=rho,
+            headwind_ms=headwind_kmh / 3.6,
+            power_watts=power_watts,
+            climb_effort=climb_effort,
+            descent_confidence=descent_confidence,
+        )
+        self._skip_fraction = skip_fraction
+        self._ewma_fraction = ewma_fraction
+        self._min_skip_s = min_skip_s
+        self._max_skip_s = max_skip_s
+        self._min_ewma_span_s = min_ewma_span_s
+        self._max_ewma_span_s = max_ewma_span_s
+        self._mass_kg = mass_kg
+        self._headwind_kmh = headwind_kmh
+        self._climb_effort = climb_effort
+        self._descent_confidence = descent_confidence
+
+    def _ratio_for(self, gradient_frac: float) -> float:
+        bin_pct = math.floor(gradient_frac * 100)
+        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
+        return self._ratios.get(bin_pct, 1.0)
+
+    def _calibrate_vflat(self, ride: Ride) -> pd.Series:
+        """Learn v_flat from observations: skip period then EWMA."""
+        df = ride.df
+        gradients, segments = _row_gradients(ride)
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(self._ratios)
+        max_bin = max(self._ratios)
+        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+
+        # Estimate ride time to scale skip and EWMA
+        _, seg_list = decimate_to_gradient_segments(df)
+        est_time_s = sum(
+            (s.end_distance_m - s.start_distance_m)
+            / max(0.5, self._v_flat_init_ms * self._ratio_for(s.gradient))
+            for s in seg_list
+        )
+        skip_s = max(
+            self._min_skip_s,
+            min(self._max_skip_s, self._skip_fraction * est_time_s),
+        )
+        ewma_span_s = max(
+            self._min_ewma_span_s,
+            min(self._max_ewma_span_s, self._ewma_fraction * est_time_s),
+        )
+        alpha_base = 2.0 / (ewma_span_s + 1)
+
+        elapsed_moving = 0.0
+        v_flat = self._v_flat_init_ms
+        initialized = False
+        result = np.empty(len(df))
+
+        for i in range(len(df)):
+            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
+                elapsed_moving += dt[i]
+                if elapsed_moving > skip_s:
+                    v_flat_obs = speed[i] / row_ratios[i]
+                    if not initialized:
+                        v_flat = v_flat_obs
+                        initialized = True
+                    else:
+                        alpha = min(alpha_base * dt[i], 1.0)
+                        v_flat = v_flat + alpha * (v_flat_obs - v_flat)
+
+            result[i] = v_flat
+
+        return pd.Series(result, index=df.index)
+
+    def predict(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        v_flat_arr = self._calibrate_vflat(ride).values
+
+        seg_starts = np.array([s.start_distance_m for s in segments])
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+
+        speeds = np.empty(len(distances))
+        for i in range(len(df)):
+            d = distances[i]
+            vf = v_flat_arr[i]
+
+            si = int(np.searchsorted(seg_ends, d, side="right"))
+            si = min(si, len(segments) - 1)
+
+            ttg = 0.0
+            for j in range(si, len(segments)):
+                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
+                s_len = seg_ends[j] - s_start
+                if s_len <= 0:
+                    continue
+                ttg += s_len / (vf * seg_ratios[j])
+
+            remaining = total_dist - d
+            if ttg > 0 and remaining > 0:
+                speeds[i] = remaining / ttg
+            else:
+                speeds[i] = np.nan
+
+        return pd.Series(speeds, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        v_flat_series = self._calibrate_vflat(ride)
+        speed = np.array(
+            [
+                v_flat_series.iloc[i] * self._ratio_for(segments[idx[i]].gradient)
+                for i in range(len(df))
+            ]
+        )
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"calibrating physics ({self._v_flat_init_ms * 3.6:.1f} km/h, "
+            f"m={self._mass_kg:.0f}kg, "
+            f"skip={self._skip_fraction:.0%}, ewma={self._ewma_fraction:.0%})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CalibratingPhysicsEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={self._v_flat_init_ms * 3.6!r}, "
+            f"skip_fraction={self._skip_fraction!r}, "
+            f"ewma_fraction={self._ewma_fraction!r})"
+        )
+
+
 def _slow_correction(
     ratio: pd.Series,
     gradients: pd.Series,
