@@ -23,6 +23,7 @@ from godot.estimators import (
     SplitIntegralPhysicsEstimator,
     VeryRealisticPhysicsEstimator,
     VerySplitIntegralPhysicsEstimator,
+    QuadIntegralPhysicsEstimator,
 )
 from godot.pause import WallClockPause
 from godot.plot import (
@@ -209,6 +210,13 @@ ESTIMATORS = {
     ),
     "5_M_very_split_integral_physics": (
         VerySplitIntegralPhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+        ),
+        WallClockPause(),
+    ),
+    "5_M_quad_integral_physics": (
+        QuadIntegralPhysicsEstimator(
             mass_kg=TOTAL_SYSTEM_MASS,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),

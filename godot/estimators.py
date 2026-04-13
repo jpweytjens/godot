@@ -2955,6 +2955,255 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         )
 
 
+class QuadIntegralPhysicsEstimator(BaseEstimator):
+    """Four-regime integral correction on the FTP-aware physics ratios.
+
+    Partitions segments into four regimes and tracks a separate integral
+    correction for each:
+
+    1. **Coasting descent** (``gradient < coast_threshold``):
+       gravity dominates, rider coasts. Threshold from
+       ``P_grav >= 3 * P_flat``, typically around -8 to -9%.
+    2. **Pedalling descent** (``coast_threshold <= gradient < 0``):
+       rider eases off but still contributes power.
+    3. **Sub-threshold climb** (``0 <= gradient < climb_threshold``):
+       rider scales effort with gradient below their ceiling.
+    4. **Super-threshold climb** (``gradient >= climb_threshold``):
+       rider at their sustainable ceiling. Threshold from
+       ``P_flat + effort * P_grav >= P_max``, typically around 4-5%.
+
+    Each regime has a different source of model bias:
+    - Coasting: braking/cornering behaviour (not modelled by physics)
+    - Pedalling descent: rider's willingness to pedal vs coast
+    - Sub-threshold climb: effort scaling accuracy
+    - Super-threshold climb: ceiling P_max value
+
+    Per-regime integrals capture these independently without per-bin
+    noise. Uses `very_realistic_physics_ratios` as the base.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_kmh : float
+        Initial flat-ground speed guess (km/h).
+    headwind_kmh : float, optional
+        Effective headwind (km/h). Default 8.0.
+    power_watts : float or None, optional
+        If provided, used as P_flat directly.
+    ftp_watts : float or None, optional
+        Rider's FTP. `P_max = 1.2 * ftp_watts` when provided.
+    climb_effort : float, optional
+        Sub-threshold climb effort scaling (0-1). Default 0.5.
+    p_max_multiplier : float, optional
+        `P_max / P_flat` when no FTP. Default 1.8.
+    descent_decay_k : float, optional
+        Descent power decay rate. Default 0.4.
+    coast_p_grav_ratio : float, optional
+        Coasting threshold: where `P_grav >= ratio * P_flat`. Default 3.0.
+    cda, crr, rho : float, optional
+        Aerodynamic and rolling resistance parameters.
+    """
+
+    def __init__(
+        self,
+        mass_kg: float,
+        v_flat_kmh: float,
+        cda: float = 0.35,
+        crr: float = 0.005,
+        rho: float = 1.225,
+        headwind_kmh: float = 8.0,
+        power_watts: float | None = None,
+        ftp_watts: float | None = None,
+        climb_effort: float = 0.5,
+        p_max_multiplier: float = 1.8,
+        descent_decay_k: float = 0.4,
+        coast_p_grav_ratio: float = 3.0,
+    ) -> None:
+        g_const = 9.81
+        v_flat_ms = v_flat_kmh / 3.6
+        headwind_ms = headwind_kmh / 3.6
+        k_a = 0.5 * rho * cda
+
+        # P_flat (same back-solve as ratios function)
+        if power_watts is not None:
+            p_flat = float(power_watts)
+        else:
+            p_flat = (
+                k_a * (v_flat_ms + headwind_ms) ** 2 * v_flat_ms
+                + crr * mass_kg * g_const * v_flat_ms
+            )
+
+        if ftp_watts is not None:
+            p_max = 1.2 * float(ftp_watts)
+        else:
+            p_max = p_max_multiplier * p_flat
+
+        # Transition gradients (in fraction, not percent).
+        # Climb: P_flat + effort * m*g*sin(θ)*v_flat = P_max
+        #   sin(θ) = (P_max - P_flat) / (effort * m * g * v_flat)
+        if climb_effort > 0:
+            sin_climb = (p_max - p_flat) / (
+                climb_effort * mass_kg * g_const * v_flat_ms
+            )
+            self._climb_threshold = max(0.0, min(0.5, sin_climb))
+        else:
+            self._climb_threshold = 0.0
+
+        # Descent: m*g*sin(θ)*v_flat = coast_p_grav_ratio * P_flat
+        sin_coast = coast_p_grav_ratio * p_flat / (mass_kg * g_const * v_flat_ms)
+        self._coast_threshold = -max(0.0, min(0.5, sin_coast))
+
+        self._v_flat_ms = v_flat_ms
+        self._ratios = very_realistic_physics_ratios(
+            mass_kg=mass_kg,
+            v_flat_ms=v_flat_ms,
+            cda=cda,
+            crr=crr,
+            rho=rho,
+            headwind_ms=headwind_ms,
+            power_watts=power_watts,
+            ftp_watts=ftp_watts,
+            climb_effort=climb_effort,
+            p_max_multiplier=p_max_multiplier,
+            descent_decay_k=descent_decay_k,
+        )
+        self._mass_kg = mass_kg
+        self._headwind_kmh = headwind_kmh
+        self._ftp_watts = ftp_watts
+        self._climb_effort = climb_effort
+        self._p_max_multiplier = p_max_multiplier
+        self._descent_decay_k = descent_decay_k
+        self._coast_p_grav_ratio = coast_p_grav_ratio
+
+    def _ratio_for(self, gradient_frac: float) -> float:
+        bin_pct = math.floor(gradient_frac * 100)
+        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
+        return self._ratios.get(bin_pct, 1.0)
+
+    def _regime(self, gradient_frac: float) -> int:
+        """0=coast, 1=pedal_descent, 2=sub_climb, 3=super_climb."""
+        if gradient_frac < self._coast_threshold:
+            return 0
+        if gradient_frac < 0:
+            return 1
+        if gradient_frac < self._climb_threshold:
+            return 2
+        return 3
+
+    def _integrals(self, ride: Ride) -> np.ndarray:
+        """Per-row (n, 4) integral corrections — one column per regime."""
+        df = ride.df
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(self._ratios)
+        max_bin = max(self._ratios)
+        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+        grad_frac = gradients.values
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        sum_actual = np.zeros(4)
+        sum_predicted = np.zeros(4)
+        integrals = np.ones(4)
+        out = np.ones((len(df), 4))
+
+        for i in range(len(df)):
+            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
+                predicted_speed = self._v_flat_ms * row_ratios[i]
+                if predicted_speed > 0 and dd[i] > 0:
+                    reg = self._regime(grad_frac[i])
+                    sum_actual[reg] += dt[i]
+                    sum_predicted[reg] += dd[i] / predicted_speed
+                    if sum_actual[reg] > 0:
+                        integrals[reg] = sum_predicted[reg] / sum_actual[reg]
+            out[i] = integrals
+
+        return out
+
+    def predict(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        integrals = self._integrals(ride)  # shape (n_rows, 4)
+
+        seg_starts = np.array([s.start_distance_m for s in segments])
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        seg_regimes = np.array([self._regime(s.gradient) for s in segments])
+
+        speeds = np.empty(len(distances))
+        for i in range(len(df)):
+            d = distances[i]
+            row_corr = integrals[i]  # (4,)
+
+            si = int(np.searchsorted(seg_ends, d, side="right"))
+            si = min(si, len(segments) - 1)
+
+            ttg = 0.0
+            for j in range(si, len(segments)):
+                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
+                s_len = seg_ends[j] - s_start
+                if s_len <= 0:
+                    continue
+                corr = row_corr[seg_regimes[j]]
+                ttg += s_len / (self._v_flat_ms * seg_ratios[j] * corr)
+
+            remaining = total_dist - d
+            if ttg > 0 and remaining > 0:
+                speeds[i] = remaining / ttg
+            else:
+                speeds[i] = np.nan
+
+        return pd.Series(speeds, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        _, segments = decimate_to_gradient_segments(ride.df)
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        integrals = self._integrals(ride)  # (n_rows, 4)
+        speed = np.array(
+            [
+                self._v_flat_ms
+                * self._ratio_for(segments[idx[i]].gradient)
+                * integrals[i, self._regime(segments[idx[i]].gradient)]
+                for i in range(len(df))
+            ]
+        )
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        ftp_str = (
+            f"FTP={self._ftp_watts:.0f}W"
+            if self._ftp_watts is not None
+            else f"P_max={self._p_max_multiplier}*P_flat"
+        )
+        return (
+            f"quad-integral physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"m={self._mass_kg:.0f}kg, {ftp_str}, "
+            f"climb_tr={self._climb_threshold * 100:.1f}%, "
+            f"coast_tr={self._coast_threshold * 100:.1f}%)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"QuadIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"ftp_watts={self._ftp_watts!r})"
+        )
+
+
 class PIPhysicsEstimator(BaseEstimator):
     """Physics ETA estimator with PI (proportional-integral) calibration.
 
