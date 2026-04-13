@@ -85,6 +85,7 @@ def backtest(
             "ata_moving_s": ata_moving_s.values,
             "delta_s": (eta_s - ata_s).values,
             "delta_moving_s": (eta_s - ata_moving_s).values,
+            "paused": df["paused"].values,
         }
     )
 
@@ -117,6 +118,10 @@ def compute_metrics(
     trimmed = result_df[result_df["distance_m"] >= warmup_distance_m].dropna(
         subset=[delta_col]
     )
+    # Exclude paused rows — error is frozen during pauses and doesn't
+    # reflect speed prediction quality.
+    if "paused" in trimmed.columns:
+        trimmed = trimmed[~trimmed["paused"]]
     delta = trimmed[delta_col]
     ata = trimmed[ata_col]
     relative = (delta / ata).where(ata > 0)
