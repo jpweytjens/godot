@@ -27,6 +27,7 @@ from godot.estimators import (
     PriorFreeVFlat,
     PriorFreeEwmaVFlat,
     CalibratingPhysicsEstimator,
+    PIPhysicsEstimator,
 )
 from godot.pause import WallClockPause
 from godot.plot import (
@@ -94,14 +95,14 @@ ESTIMATORS = {
         ),
         WallClockPause(),
     ),
-    "2_M_global_physics_slow_cal": (
-        AdaptivePhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            cal_max_grad=0.02,
-        ),
-        WallClockPause(),
-    ),
+    # "2_M_global_physics_slow_cal": (
+    #     AdaptivePhysicsEstimator(
+    #         mass_kg=TOTAL_SYSTEM_MASS,
+    #         v_flat_kmh=GLOBAL_PRIOR_KMH,
+    #         cal_max_grad=0.02,
+    #     ),
+    #     WallClockPause(),
+    # ),
     # --- Level 3: + per-bin fast EWMA ---
     "3_M_global_empirical_binned": (
         BinnedAdaptiveEstimator(
@@ -140,24 +141,24 @@ ESTIMATORS = {
         ),
         WallClockPause(),
     ),
-    "4_M_oracle_empirical_trusted": (
-        OracleTrustedBinnedEstimator(
-            prior=GradientPriorEstimator(
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-                ratios=GRADIENT_RATIOS,
-            ),
-        ),
-        WallClockPause(),
-    ),
-    "4_M_oracle_physics_trusted": (
-        OracleTrustedBinnedEstimator(
-            prior=PhysicsGradientPriorEstimator(
-                mass_kg=TOTAL_SYSTEM_MASS,
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ),
-        ),
-        WallClockPause(),
-    ),
+    # "4_M_oracle_empirical_trusted": (
+    #     OracleTrustedBinnedEstimator(
+    #         prior=GradientPriorEstimator(
+    #             v_flat_kmh=GLOBAL_PRIOR_KMH,
+    #             ratios=GRADIENT_RATIOS,
+    #         ),
+    #     ),
+    #     WallClockPause(),
+    # ),
+    # "4_M_oracle_physics_trusted": (
+    #     OracleTrustedBinnedEstimator(
+    #         prior=PhysicsGradientPriorEstimator(
+    #             mass_kg=TOTAL_SYSTEM_MASS,
+    #             v_flat_kmh=GLOBAL_PRIOR_KMH,
+    #         ),
+    #     ),
+    #     WallClockPause(),
+    # ),
     # --- Level 5: realistic physics prior ---
     "1_M_global_realistic_prior": (
         RealisticPhysicsEstimator(
@@ -178,6 +179,13 @@ ESTIMATORS = {
     # --- Calibrating physics: self-contained realistic + EWMA v_flat ---
     "5_M_calibrating_physics": (
         CalibratingPhysicsEstimator(
+            mass_kg=TOTAL_SYSTEM_MASS,
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+        ),
+        WallClockPause(),
+    ),
+    "5_M_pi_physics": (
+        PIPhysicsEstimator(
             mass_kg=TOTAL_SYSTEM_MASS,
             v_flat_kmh=GLOBAL_PRIOR_KMH,
         ),
