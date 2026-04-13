@@ -26,6 +26,7 @@ from godot.estimators import (
     MedianLockVFlat,
     FlatSpeedVFlat,
     PriorFreeVFlat,
+    PriorFreeEwmaVFlat,
 )
 from godot.pause import NoPause, WallClockPause
 from godot.plot import (
@@ -234,6 +235,14 @@ ESTIMATORS = {
             v_flat_kmh=GLOBAL_PRIOR_KMH,
             ratios=REALISTIC_RATIOS,
             vflat_estimator=PriorFreeVFlat(),
+        ),
+        WallClockPause(),
+    ),
+    "2_M_priorfree_ewma_realistic_adaptive_vflat": (
+        AdaptiveGradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH,
+            ratios=REALISTIC_RATIOS,
+            vflat_estimator=PriorFreeEwmaVFlat(),
         ),
         WallClockPause(),
     ),

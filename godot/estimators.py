@@ -1291,6 +1291,123 @@ class PriorFreeVFlat(VFlatEstimator):
         )
 
 
+class PriorFreeEwmaVFlat(VFlatEstimator):
+    """Prior-free v_flat estimator with ride-time-scaled EWMA.
+
+    Like `PriorFreeVFlat` but after the skip period uses an EWMA
+    instead of an expanding mean, allowing the estimate to track
+    gradual changes (e.g. fatigue). The EWMA span is a fraction of
+    the estimated ride time.
+
+    Parameters
+    ----------
+    skip_fraction : float
+        Fraction of estimated ride time to skip. Default 0.01 (1%).
+    ewma_fraction : float
+        EWMA span as fraction of estimated ride time. Default 0.10.
+    min_skip_s : float
+        Floor on skip period (moving seconds). Default 20.
+    max_skip_s : float
+        Ceiling on skip period (moving seconds). Default 300.
+    min_ewma_span_s : float
+        Floor on EWMA span (seconds). Default 120.
+    max_ewma_span_s : float
+        Ceiling on EWMA span (seconds). Default 1800 (30 min).
+    """
+
+    def __init__(
+        self,
+        skip_fraction: float = 0.01,
+        ewma_fraction: float = 0.10,
+        min_skip_s: float = 20.0,
+        max_skip_s: float = 300.0,
+        min_ewma_span_s: float = 120.0,
+        max_ewma_span_s: float = 1800.0,
+    ) -> None:
+        self._skip_fraction = skip_fraction
+        self._ewma_fraction = ewma_fraction
+        self._min_skip_s = min_skip_s
+        self._max_skip_s = max_skip_s
+        self._min_ewma_span_s = min_ewma_span_s
+        self._max_ewma_span_s = max_ewma_span_s
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin = min(ratios)
+        max_bin = max(ratios)
+        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        row_ratios = np.array([ratios.get(g, 1.0) for g in grad_pct])
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+
+        # Estimate ride time to scale skip and EWMA
+        _, segments = decimate_to_gradient_segments(df)
+        est_time_s = sum(
+            (s.end_distance_m - s.start_distance_m)
+            / max(
+                0.5,
+                v_flat_init_ms
+                * ratios.get(
+                    max(min_bin, min(max_bin, math.floor(s.gradient * 100))),
+                    1.0,
+                ),
+            )
+            for s in segments
+        )
+        skip_s = max(
+            self._min_skip_s,
+            min(self._max_skip_s, self._skip_fraction * est_time_s),
+        )
+        ewma_span_s = max(
+            self._min_ewma_span_s,
+            min(self._max_ewma_span_s, self._ewma_fraction * est_time_s),
+        )
+        alpha_base = 2.0 / (ewma_span_s + 1)
+
+        elapsed_moving = 0.0
+        v_flat = v_flat_init_ms
+        initialized = False
+        result = np.empty(len(df))
+
+        for i in range(len(df)):
+            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
+                elapsed_moving += dt[i]
+                if elapsed_moving > skip_s:
+                    v_flat_obs = speed[i] / row_ratios[i]
+                    if not initialized:
+                        v_flat = v_flat_obs
+                        initialized = True
+                    else:
+                        alpha = min(alpha_base * dt[i], 1.0)
+                        v_flat = v_flat + alpha * (v_flat_obs - v_flat)
+
+            result[i] = v_flat
+
+        return pd.Series(result, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"prior-free-ewma(skip={self._skip_fraction:.0%}, "
+            f"ewma={self._ewma_fraction:.0%}, "
+            f"[{self._min_skip_s:.0f}-{self._max_skip_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PriorFreeEwmaVFlat(skip_fraction={self._skip_fraction!r}, "
+            f"ewma_fraction={self._ewma_fraction!r})"
+        )
+
+
 class AdaptiveGradientPriorEstimator(BaseEstimator):
     """Gradient-aware ETA estimator with adaptive v_flat.
 
