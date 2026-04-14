@@ -1513,38 +1513,15 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
 
-        v_flat_series = self._vflat_est.estimate(
+        v_flat_arr = self._vflat_est.estimate(
             ride, self._ratios, self._v_flat_init_ms
-        )
-        v_flat_arr = v_flat_series.values
+        ).values
 
-        seg_starts = np.array([s.start_distance_m for s in segments])
-        seg_ends = np.array([s.end_distance_m for s in segments])
         seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
-
-        speeds = np.empty(len(distances))
-        for i in range(len(df)):
-            d = distances[i]
-            vf = v_flat_arr[i]
-
-            si = int(np.searchsorted(seg_ends, d, side="right"))
-            si = min(si, len(segments) - 1)
-
-            ttg = 0.0
-            for j in range(si, len(segments)):
-                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
-                s_len = seg_ends[j] - s_start
-                if s_len <= 0:
-                    continue
-                ttg += s_len / (vf * seg_ratios[j])
-
-            remaining = total_dist - d
-            if ttg > 0 and remaining > 0:
-                speeds[i] = remaining / ttg
-            else:
-                speeds[i] = np.nan
-
-        return pd.Series(speeds, index=df.index)
+        base_ttg = segment_ttg_from_row(distances, total_dist, segments, seg_ratios)
+        ttg = np.where(v_flat_arr > 0, base_ttg / v_flat_arr, np.nan)
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
         segments = ride.gradient_segments
@@ -1554,17 +1531,11 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
         idx = np.searchsorted(seg_ends, distances, side="left").clip(
             max=len(segments) - 1
         )
-
-        v_flat_series = self._vflat_est.estimate(
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        v_flat_arr = self._vflat_est.estimate(
             ride, self._ratios, self._v_flat_init_ms
-        )
-
-        speed = np.array(
-            [
-                v_flat_series.iloc[i] * self._ratio_for(segments[idx[i]].gradient)
-                for i in range(len(df))
-            ]
-        )
+        ).values
+        speed = v_flat_arr * seg_ratios[idx]
         return pd.Series(speed, index=df.index)
 
 
@@ -2259,33 +2230,11 @@ class CalibratingPhysicsEstimator(BaseEstimator):
 
         v_flat_arr = self._calibrate_vflat(ride).values
 
-        seg_starts = np.array([s.start_distance_m for s in segments])
-        seg_ends = np.array([s.end_distance_m for s in segments])
         seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
-
-        speeds = np.empty(len(distances))
-        for i in range(len(df)):
-            d = distances[i]
-            vf = v_flat_arr[i]
-
-            si = int(np.searchsorted(seg_ends, d, side="right"))
-            si = min(si, len(segments) - 1)
-
-            ttg = 0.0
-            for j in range(si, len(segments)):
-                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
-                s_len = seg_ends[j] - s_start
-                if s_len <= 0:
-                    continue
-                ttg += s_len / (vf * seg_ratios[j])
-
-            remaining = total_dist - d
-            if ttg > 0 and remaining > 0:
-                speeds[i] = remaining / ttg
-            else:
-                speeds[i] = np.nan
-
-        return pd.Series(speeds, index=df.index)
+        base_ttg = segment_ttg_from_row(distances, total_dist, segments, seg_ratios)
+        ttg = np.where(v_flat_arr > 0, base_ttg / v_flat_arr, np.nan)
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
         segments = ride.gradient_segments
@@ -3130,34 +3079,12 @@ class PIPhysicsEstimator(BaseEstimator):
         v_flat_arr = v_flat_s.values
         integral_arr = integral_s.values
 
-        seg_starts = np.array([s.start_distance_m for s in segments])
-        seg_ends = np.array([s.end_distance_m for s in segments])
         seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
-
-        speeds = np.empty(len(distances))
-        for i in range(len(df)):
-            d = distances[i]
-            vf = v_flat_arr[i]
-            corr = integral_arr[i]
-
-            si = int(np.searchsorted(seg_ends, d, side="right"))
-            si = min(si, len(segments) - 1)
-
-            ttg = 0.0
-            for j in range(si, len(segments)):
-                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
-                s_len = seg_ends[j] - s_start
-                if s_len <= 0:
-                    continue
-                ttg += s_len / (vf * seg_ratios[j] * corr)
-
-            remaining = total_dist - d
-            if ttg > 0 and remaining > 0:
-                speeds[i] = remaining / ttg
-            else:
-                speeds[i] = np.nan
-
-        return pd.Series(speeds, index=df.index)
+        base_ttg = segment_ttg_from_row(distances, total_dist, segments, seg_ratios)
+        scale = v_flat_arr * integral_arr
+        ttg = np.where(scale > 0, base_ttg / scale, np.nan)
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
         segments = ride.gradient_segments
@@ -3489,8 +3416,10 @@ class BinnedAdaptiveEstimator(BaseEstimator):
         gradients, segments = _row_gradients(ride)
         df = ride.df
         v_flat = self._prior._v_flat_ms
-        grad_bins = _gradient_bin_pct(gradients, self._bin_size)
+        grad_bins = _gradient_bin_pct(gradients, self._bin_size).values.astype(np.int64)
         bs = self._bin_size
+        n = len(df)
+        n_seg = len(segments)
 
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -3499,39 +3428,55 @@ class BinnedAdaptiveEstimator(BaseEstimator):
             [v_flat * self._prior._ratio_for(s.gradient) for s in segments]
         )
         seg_bins = np.array(
-            [int(np.floor(s.gradient * 100 / bs) * bs) for s in segments]
+            [int(np.floor(s.gradient * 100 / bs) * bs) for s in segments],
+            dtype=np.int64,
         )
         seg_start_dists = np.array([s.start_distance_m for s in segments])
         seg_end_dists = np.array([s.end_distance_m for s in segments])
 
-        # Scan forward: accumulate per-bin fast corrections and compute TTG
-        ttg = np.empty(len(distances))
-        running_bin_fast: dict[int, float] = {}
+        # Union of bin values we need columns for: rows and segments
+        all_bins = np.unique(np.concatenate([grad_bins, seg_bins]))
+        bin_index = {int(b): i for i, b in enumerate(all_bins.tolist())}
+        n_bins = len(all_bins)
+        row_col = np.array([bin_index[int(b)] for b in grad_bins], dtype=np.int64)
+        seg_col = np.array([bin_index[int(b)] for b in seg_bins], dtype=np.int64)
 
-        for i in range(len(df)):
-            b = int(grad_bins.iloc[i])
-            f = fast.iloc[i]
-            if not np.isnan(f):
-                running_bin_fast[b] = f
+        # Per-row "last-seen fast correction" matrix C[i, col].
+        # Original loop updates running_bin_fast[grad_bins[i]] = fast[i] for
+        # every row before computing TTG at row i; ffill reproduces that.
+        fast_vals = fast.values
+        C = np.full((n, n_bins), np.nan)
+        valid_fast = ~np.isnan(fast_vals)
+        if valid_fast.any():
+            C[valid_fast, row_col[valid_fast]] = fast_vals[valid_fast]
+        C = pd.DataFrame(C).ffill().fillna(1.0).values
+        inv_C = 1.0 / C
 
-            slow_i = slow.iloc[i]
-            d = distances[i]
+        # Per-bin reverse cumsum of (full-segment time at base speed).
+        seg_len_full = seg_end_dists - seg_start_dists
+        seg_tau = seg_len_full / seg_base_speeds
+        G = np.zeros((n_seg, n_bins))
+        G[np.arange(n_seg), seg_col] = seg_tau
+        # R[k, col] = sum_{j >= k, seg_col[j]==col} seg_tau[j]; R[n_seg] = 0.
+        R = np.zeros((n_seg + 1, n_bins))
+        R[:-1] = np.cumsum(G[::-1], axis=0)[::-1]
 
-            si = int(np.searchsorted(seg_end_dists, d, side="right"))
-            si = min(si, len(segments) - 1)
+        # Starting segment per row
+        si_arr = np.minimum(
+            np.searchsorted(seg_end_dists, distances, side="right"), n_seg - 1
+        )
 
-            t = 0.0
-            for j in range(si, len(segments)):
-                seg_start = (
-                    max(seg_start_dists[j], d) if j == si else seg_start_dists[j]
-                )
-                seg_len = seg_end_dists[j] - seg_start
-                if seg_len <= 0:
-                    continue
-                bin_corr = running_bin_fast.get(seg_bins[j], 1.0)
-                t += seg_len / (seg_base_speeds[j] * slow_i * bin_corr)
+        # Contribution from all segments j > si (full length)
+        contrib_after = np.einsum("ij,ij->i", inv_C, R[si_arr + 1])
 
-            ttg[i] = t
+        # Contribution from segment si itself (clipped to current distance)
+        clipped_start = np.maximum(seg_start_dists[si_arr], distances)
+        clipped_len = np.maximum(seg_end_dists[si_arr] - clipped_start, 0.0)
+        si_V = seg_base_speeds[si_arr]
+        si_bin_corr = C[np.arange(n), seg_col[si_arr]]
+        contrib_si = np.where(clipped_len > 0, clipped_len / (si_V * si_bin_corr), 0.0)
+
+        ttg = (contrib_si + contrib_after) / slow.values
 
         remaining = total_dist - distances
         valid = (ttg > 0) & (remaining > 0)
