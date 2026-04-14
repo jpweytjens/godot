@@ -7,6 +7,7 @@ import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
 from godot.benchmark import backtest, compute_metrics
+from godot.config import RideConfig
 from godot.estimators import (
     AvgSpeedEstimator,
     AdaptiveGradientPriorEstimator,
@@ -16,7 +17,6 @@ from godot.estimators import (
     GradientPriorEstimator,
     PhysicsGradientPriorEstimator,
     RealisticPhysicsEstimator,
-    realistic_physics_ratios,
     CalibratingPhysicsEstimator,
     PIPhysicsEstimator,
     IntegralPhysicsEstimator,
@@ -44,185 +44,73 @@ from godot.theme import TOL_VIBRANT
 from godot.ride import load_ride
 from godot.theme import TOL_BRIGHT
 
-REF_MOVING = "0_M_avg_speed"
+REF_MOVING = "L0_none_moving_average"
 REF_MOVING_COLOR = TOL_BRIGHT[4]  # cyan
 REF_OPACITY = 0.7
 
-# Load empirical gradient ratios
-_ratio_df = pd.read_parquet(Path("data/gradient_ratios.parquet"))
-GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
-GLOBAL_PRIOR_KMH = 28.8  # tunable flat-ground speed
-TOTAL_SYSTEM_MASS = 85 + 10  # rider + bike, for physics-based estimators
-REALISTIC_RATIOS: dict[int, float] = realistic_physics_ratios(
-    mass_kg=TOTAL_SYSTEM_MASS,
-    v_flat_ms=GLOBAL_PRIOR_KMH / 3.6,
-)
+CFG = RideConfig()
+GRADIENT_RATIOS = CFG.empirical_ratios
+GLOBAL_PRIOR_KMH = CFG.v_flat_kmh
+REALISTIC_RATIOS = CFG.realistic_ratios
 
 
-# Estimator naming convention: {level}_M_{prior}_{name}
-#   level: 0-5 (complexity / correction layers)
-#   M:     Moving time — all estimators use WallClockPause
-#   prior: global (fixed), oracle, or estimator name (e.g. wgain)
-#   name:  descriptive correction layer
-ESTIMATORS = {
-    # --- Level 0: no gradient awareness ---
-    "0_M_avg_speed": (
-        AvgSpeedEstimator(moving_only=True),
-        WallClockPause(),
+# Estimator naming convention: L{level}_{vflat_source}_{name}
+# Each estimator exposes its `key` as a property — see godot.estimators.BaseEstimator.
+# `vflat_source`: fixed_vflat | online_<strategy> | oracle_vflat | none
+_ESTIMATOR_INSTANCES = [
+    AvgSpeedEstimator(moving_only=True),
+    GradientPriorEstimator(v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS),
+    PhysicsGradientPriorEstimator(
+        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
     ),
-    # --- Level 1: gradient prior only (no online correction) ---
-    "1_M_global_empirical_prior": (
-        GradientPriorEstimator(v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS),
-        WallClockPause(),
+    RealisticPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
+    VeryRealisticPhysicsEstimator(
+        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
     ),
-    "1_M_global_physics_prior": (
-        PhysicsGradientPriorEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
+    AdaptiveGradientPriorEstimator(
+        v_flat_kmh=GLOBAL_PRIOR_KMH,
+        ratios=GRADIENT_RATIOS,
+        vflat_estimator=WeightedGainVFlat(),
+    ),
+    BinnedAdaptiveEstimator(
+        prior=GradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS
         ),
-        WallClockPause(),
     ),
-    # --- Level 2: + slow EWMA or adaptive v_flat ---
-    "2_M_wgain_empirical_adaptive_vflat": (
-        AdaptiveGradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ratios=GRADIENT_RATIOS,
-            vflat_estimator=WeightedGainVFlat(),
+    BinnedAdaptiveEstimator(
+        prior=PhysicsGradientPriorEstimator(
+            mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
         ),
-        WallClockPause(),
     ),
-    # "2_M_global_physics_slow_cal": (
-    #     AdaptivePhysicsEstimator(
-    #         mass_kg=TOTAL_SYSTEM_MASS,
-    #         v_flat_kmh=GLOBAL_PRIOR_KMH,
-    #         cal_max_grad=0.02,
-    #     ),
-    #     WallClockPause(),
-    # ),
-    # --- Level 3: + per-bin fast EWMA ---
-    "3_M_global_empirical_binned": (
-        BinnedAdaptiveEstimator(
-            prior=GradientPriorEstimator(
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-                ratios=GRADIENT_RATIOS,
-            ),
+    TrustedBinnedAdaptiveEstimator(
+        prior=GradientPriorEstimator(
+            v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS
         ),
-        WallClockPause(),
     ),
-    "3_M_global_physics_binned": (
-        BinnedAdaptiveEstimator(
-            prior=PhysicsGradientPriorEstimator(
-                mass_kg=TOTAL_SYSTEM_MASS,
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ),
+    TrustedBinnedAdaptiveEstimator(
+        prior=PhysicsGradientPriorEstimator(
+            mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
         ),
-        WallClockPause(),
     ),
-    # --- Level 4: + trust ramp + clamping ---
-    "4_M_global_empirical_trusted": (
-        TrustedBinnedAdaptiveEstimator(
-            prior=GradientPriorEstimator(
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-                ratios=GRADIENT_RATIOS,
-            ),
+    TrustedBinnedAdaptiveEstimator(
+        prior=RealisticPhysicsEstimator(
+            mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
         ),
-        WallClockPause(),
     ),
-    "4_M_global_physics_trusted": (
-        TrustedBinnedAdaptiveEstimator(
-            prior=PhysicsGradientPriorEstimator(
-                mass_kg=TOTAL_SYSTEM_MASS,
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ),
-        ),
-        WallClockPause(),
+    CalibratingPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
+    PIPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
+    IntegralPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
+    SplitIntegralPhysicsEstimator(
+        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
     ),
-    # "4_M_oracle_empirical_trusted": (
-    #     OracleTrustedBinnedEstimator(
-    #         prior=GradientPriorEstimator(
-    #             v_flat_kmh=GLOBAL_PRIOR_KMH,
-    #             ratios=GRADIENT_RATIOS,
-    #         ),
-    #     ),
-    #     WallClockPause(),
-    # ),
-    # "4_M_oracle_physics_trusted": (
-    #     OracleTrustedBinnedEstimator(
-    #         prior=PhysicsGradientPriorEstimator(
-    #             mass_kg=TOTAL_SYSTEM_MASS,
-    #             v_flat_kmh=GLOBAL_PRIOR_KMH,
-    #         ),
-    #     ),
-    #     WallClockPause(),
-    # ),
-    # --- Level 5: realistic physics prior ---
-    "1_M_global_realistic_prior": (
-        RealisticPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
+    VerySplitIntegralPhysicsEstimator(
+        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
     ),
-    "5_M_global_realistic_trusted": (
-        TrustedBinnedAdaptiveEstimator(
-            prior=RealisticPhysicsEstimator(
-                mass_kg=TOTAL_SYSTEM_MASS,
-                v_flat_kmh=GLOBAL_PRIOR_KMH,
-            ),
-        ),
-        WallClockPause(),
+    QuadIntegralPhysicsEstimator(
+        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
     ),
-    # --- Calibrating physics: self-contained realistic + EWMA v_flat ---
-    "5_M_calibrating_physics": (
-        CalibratingPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
-    ),
-    "5_M_pi_physics": (
-        PIPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
-    ),
-    "5_M_integral_physics": (
-        IntegralPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
-    ),
-    "5_M_split_integral_physics": (
-        SplitIntegralPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
-    ),
-    "5_M_very_realistic_prior": (
-        VeryRealisticPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
-    ),
-    "5_M_very_split_integral_physics": (
-        VerySplitIntegralPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
-    ),
-    "5_M_quad_integral_physics": (
-        QuadIntegralPhysicsEstimator(
-            mass_kg=TOTAL_SYSTEM_MASS,
-            v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ),
-        WallClockPause(),
-    ),
-}
+]
+ESTIMATORS = {est.key: (est, WallClockPause()) for est in _ESTIMATOR_INSTANCES}
 
 
 def run(

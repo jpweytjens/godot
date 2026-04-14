@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
+from godot.config import RideConfig
 from godot.estimators import (
     EwmaLockVFlat,
     FlatSpeedVFlat,
@@ -16,19 +17,14 @@ from godot.estimators import (
     VFlatEstimator,
     WeightedGainVFlat,
     _row_gradients,
-    realistic_physics_ratios,
 )
 from godot.ride import load_ride
 
-# Load empirical gradient ratios
-_ratio_df = pd.read_parquet(Path("data/gradient_ratios.parquet"))
-GRADIENT_RATIOS: dict[int, float] = _ratio_df["mean_ratio"].to_dict()
-GLOBAL_PRIOR_KMH = 28.8
-TOTAL_SYSTEM_MASS = 85 + 10
-REALISTIC_RATIOS: dict[int, float] = realistic_physics_ratios(
-    mass_kg=TOTAL_SYSTEM_MASS,
-    v_flat_ms=GLOBAL_PRIOR_KMH / 3.6,
-)
+CFG = RideConfig()
+GRADIENT_RATIOS = CFG.empirical_ratios
+GLOBAL_PRIOR_KMH = CFG.v_flat_kmh
+TOTAL_SYSTEM_MASS = CFG.total_mass_kg
+REALISTIC_RATIOS = CFG.realistic_ratios
 
 # Each entry: (name, estimator, ratios_dict)
 ESTIMATORS: list[tuple[str, VFlatEstimator, dict[int, float]]] = [
