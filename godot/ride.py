@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Sequence
 
@@ -19,6 +20,7 @@ from godot.gpx import (
     read_gpx,
 )
 from godot.plot import prep_time_axis
+from godot.segmentation import RouteSegment, decimate_to_gradient_segments
 from godot.convert import ms_to_kmh
 from tqdm.contrib.concurrent import process_map
 
@@ -76,6 +78,12 @@ class Ride:
     total_time: float
     ride_time: float
     paused_time: float
+
+    @cached_property
+    def gradient_segments(self) -> list[RouteSegment]:
+        """Decimated route gradient segments (default VW params), computed once per ride."""
+        _, segments = decimate_to_gradient_segments(self.df)
+        return segments
 
     def __str__(self) -> str:
         dist_km = self.distance / 1000

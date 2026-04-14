@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from godot.config import RideConfig
-from godot.segmentation import RouteSegment, decimate_to_gradient_segments
+from godot.segmentation import RouteSegment
 from godot.ttg import effective_speed_from_ttg, segment_ttg_from_row
 from godot.convert import kmh_to_ms, ms_to_kmh
 
@@ -1287,7 +1287,7 @@ class PriorFreeVFlat(VFlatEstimator):
         dt = df["delta_time"].values
 
         # Estimate ride time to scale skip period
-        _, segments = decimate_to_gradient_segments(df)
+        segments = ride.gradient_segments
         est_time_s = sum(
             (s.end_distance_m - s.start_distance_m)
             / max(
@@ -1396,7 +1396,7 @@ class PriorFreeEwmaVFlat(VFlatEstimator):
         dt = df["delta_time"].values
 
         # Estimate ride time to scale skip and EWMA
-        _, segments = decimate_to_gradient_segments(df)
+        segments = ride.gradient_segments
         est_time_s = sum(
             (s.end_distance_m - s.start_distance_m)
             / max(
@@ -1508,7 +1508,7 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
         )
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -1547,7 +1547,7 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
         return pd.Series(speeds, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -1617,7 +1617,7 @@ class GradientPriorEstimator(BaseEstimator):
         return ttg
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -1631,7 +1631,7 @@ class GradientPriorEstimator(BaseEstimator):
 
     def predict_current(self, ride: Ride) -> pd.Series:
         """Predicted instantaneous speed based on current segment gradient."""
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -2214,7 +2214,7 @@ class CalibratingPhysicsEstimator(BaseEstimator):
         dt = df["delta_time"].values
 
         # Estimate ride time to scale skip and EWMA
-        _, seg_list = decimate_to_gradient_segments(df)
+        seg_list = ride.gradient_segments
         est_time_s = sum(
             (s.end_distance_m - s.start_distance_m)
             / max(0.5, self._v_flat_init_ms * self._ratio_for(s.gradient))
@@ -2252,7 +2252,7 @@ class CalibratingPhysicsEstimator(BaseEstimator):
         return pd.Series(result, index=df.index)
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -2288,7 +2288,7 @@ class CalibratingPhysicsEstimator(BaseEstimator):
         return pd.Series(speeds, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -2399,7 +2399,7 @@ class IntegralPhysicsEstimator(BaseEstimator):
         return pd.Series(result, index=df.index)
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -2419,7 +2419,7 @@ class IntegralPhysicsEstimator(BaseEstimator):
         return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -2546,7 +2546,7 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         )
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -2573,7 +2573,7 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -2706,7 +2706,7 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         )
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -2729,7 +2729,7 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -2917,7 +2917,7 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
         return out
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -2945,7 +2945,7 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
         return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -3062,7 +3062,7 @@ class PIPhysicsEstimator(BaseEstimator):
         dd = df["delta_distance"].values
 
         # Estimate ride time to scale skip and EWMA
-        _, seg_list = decimate_to_gradient_segments(df)
+        seg_list = ride.gradient_segments
         est_time_s = sum(
             (s.end_distance_m - s.start_distance_m)
             / max(0.5, self._v_flat_init_ms * self._ratio_for(s.gradient))
@@ -3121,7 +3121,7 @@ class PIPhysicsEstimator(BaseEstimator):
         )
 
     def predict(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
@@ -3160,7 +3160,7 @@ class PIPhysicsEstimator(BaseEstimator):
         return pd.Series(speeds, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
-        _, segments = decimate_to_gradient_segments(ride.df)
+        segments = ride.gradient_segments
         df = ride.df
         distances = df["distance_m"].values
         seg_ends = np.array([s.end_distance_m for s in segments])
@@ -3358,7 +3358,7 @@ class AdaptivePhysicsEstimator(BaseEstimator):
 def _row_gradients(ride: Ride) -> tuple[pd.Series, list[RouteSegment]]:
     """Per-row gradient (fraction) and segment list from decimated route."""
     df = ride.df
-    _, segments = decimate_to_gradient_segments(df)
+    segments = ride.gradient_segments
     seg_ends = np.array([s.end_distance_m for s in segments])
     seg_idx = np.searchsorted(seg_ends, df["distance_m"].values, side="left").clip(
         max=len(segments) - 1
