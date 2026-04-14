@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from godot.segmentation import RouteSegment, decimate_to_gradient_segments
+from godot.ttg import effective_speed_from_ttg, segment_ttg_from_row
 
 if TYPE_CHECKING:
     from godot.ride import Ride
@@ -26,12 +27,44 @@ def _default_min_periods(window_s: float) -> int:
 
 
 class BaseEstimator:
-    """Base for ETA estimators. Subclasses must implement `predict`."""
+    """Base for ETA estimators. Subclasses must implement `predict`.
+
+    Identity attributes (`level`, `name`, `vflat_source`) feed the
+    backtest key via `.key`. Subclasses set these as class attributes.
+
+    `vflat_source` vocabulary:
+    - ``"fixed_vflat"``: uses a preset v_flat constant for the whole ride.
+    - ``"online_<strategy>"``: estimates v_flat live (e.g. ``online_wgain``).
+    - ``"oracle_vflat"``: whole-ride flat-section average (cheating baseline).
+    - ``"none"``: estimator doesn't use a v_flat (e.g. `AvgSpeedEstimator`).
+    """
+
+    level: int = 0
+    name: str = ""
+    vflat_source: str = "none"
+    family: str = ""  # short stem used by wrapping estimators (e.g. "empirical")
+
+    _ratios: dict[int, float]
+
+    @property
+    def key(self) -> str:
+        """Backtest key: ``L{level}_{vflat_source}_{name}``."""
+        return f"L{self.level}_{self.vflat_source}_{self.name}"
 
     @staticmethod
     def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
         """Element-wise division, returning NaN where either operand is zero."""
         return (numerator / denominator).where((denominator != 0) & (numerator != 0))
+
+    def _ratio_for(self, gradient_frac: float) -> float:
+        """Look up the speed ratio for a gradient, clamping to known bins.
+
+        Subclasses using this must set `self._ratios: dict[int, float]`
+        mapping integer gradient bin (%) to speed ratio.
+        """
+        bin_pct = math.floor(gradient_frac * 100)
+        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
+        return self._ratios.get(bin_pct, 1.0)
 
     def predict(self, ride: Ride) -> pd.Series:
         """Return estimated speed in m/s at each row.
@@ -80,6 +113,10 @@ class AvgSpeedEstimator(BaseEstimator):
         Prevents noisy estimates at ride start where the expanding
         average is essentially instantaneous speed.
     """
+
+    level = 0
+    name = "moving_average"
+    vflat_source = "none"
 
     def __init__(self, moving_only: bool = True, min_periods: int = 60) -> None:
         self._moving_only = moving_only
@@ -740,7 +777,12 @@ class VFlatEstimator:
 
     Subclasses implement `estimate` which returns a per-row v_flat series
     (m/s) given a ride and a set of gradient speed ratios.
+
+    Subclasses set `tag` to a short identifier used by wrapping
+    estimators to build their `vflat_source` (e.g. ``"online_{tag}"``).
     """
+
+    tag: str = "vflat"
 
     @staticmethod
     def safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -898,6 +940,8 @@ class WeightedGainVFlat(VFlatEstimator):
     lambda_slow : float, optional
         Minimum gain floor for long-term drift tracking. Default 0.002.
     """
+
+    tag = "wgain"
 
     def __init__(self, tau_s: float = 30.0, lambda_slow: float = 0.002) -> None:
         self._tau_s = tau_s
@@ -1426,6 +1470,14 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
         Strategy for updating v_flat during the ride.
     """
 
+    level = 2
+    name = "empirical_gradient_prior"
+    family = "empirical"
+
+    @property
+    def vflat_source(self) -> str:
+        return f"online_{self._vflat_est.tag}"
+
     def __init__(
         self,
         v_flat_kmh: float,
@@ -1451,11 +1503,6 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
             f"ratios=<{len(self._ratios)} bins>, "
             f"vflat_estimator={self._vflat_est!r})"
         )
-
-    def _ratio_for(self, gradient_frac: float) -> float:
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
 
     def predict(self, ride: Ride) -> pd.Series:
         _, segments = decimate_to_gradient_segments(ride.df)
@@ -1533,6 +1580,11 @@ class GradientPriorEstimator(BaseEstimator):
         Mapping of gradient bin (left-edge %) to speed ratio relative to flat.
     """
 
+    level = 1
+    name = "empirical_gradient_prior"
+    vflat_source = "fixed_vflat"
+    family = "empirical"
+
     def __init__(self, v_flat_kmh: float, ratios: dict[int, float]) -> None:
         self._v_flat_ms = v_flat_kmh / 3.6
         self._ratios = ratios
@@ -1545,12 +1597,6 @@ class GradientPriorEstimator(BaseEstimator):
             f"GradientPriorEstimator(v_flat_kmh={self._v_flat_ms * 3.6!r}, "
             f"ratios=<{len(self._ratios)} bins>)"
         )
-
-    def _ratio_for(self, gradient_frac: float) -> float:
-        """Look up the speed ratio for a gradient, clamping to known bins."""
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
 
     def _ttg_from(self, distance_m: float, segments: list[RouteSegment]) -> float:
         """Time-to-go in seconds from `distance_m` to end of route."""
@@ -1568,36 +1614,13 @@ class GradientPriorEstimator(BaseEstimator):
         _, segments = decimate_to_gradient_segments(ride.df)
         df = ride.df
         total_dist = df["distance_m"].iloc[-1]
-
-        # Precompute TTG at each segment start (+ end of route = 0)
-        seg_starts = np.array([s.start_distance_m for s in segments] + [total_dist])
-        seg_ttgs = np.empty(len(seg_starts))
-        seg_ttgs[-1] = 0.0
-        for i in range(len(segments) - 1, -1, -1):
-            seg = segments[i]
-            length = seg.end_distance_m - seg.start_distance_m
-            ratio = self._ratio_for(seg.gradient)
-            seg_ttgs[i] = seg_ttgs[i + 1] + length / (self._v_flat_ms * ratio)
-
-        # For each row, interpolate TTG from precomputed segment boundaries
         distances = df["distance_m"].values
-        idx = np.searchsorted(seg_starts, distances, side="right") - 1
-        idx = idx.clip(0, len(segments) - 1)
 
-        # TTG = ttg_at_next_boundary + partial_segment_time
-        ttg = np.empty(len(distances))
-        for i, (d, si) in enumerate(zip(distances, idx)):
-            seg = segments[si]
-            past_in_seg = d - seg.start_distance_m
-            ratio = self._ratio_for(seg.gradient)
-            partial_time = past_in_seg / (self._v_flat_ms * ratio)
-            ttg[i] = seg_ttgs[si] - partial_time
-
-        # Back-derive effective speed: remaining_distance / ttg
-        remaining = total_dist - distances
-        valid = (ttg > 0) & (remaining > 0)
-        safe_ttg = np.where(valid, ttg, 1.0)
-        speed = np.where(valid, remaining / safe_ttg, np.nan)
+        seg_speeds = np.array(
+            [self._v_flat_ms * self._ratio_for(s.gradient) for s in segments]
+        )
+        ttg = segment_ttg_from_row(distances, total_dist, segments, seg_speeds)
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
         return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
@@ -1967,6 +1990,9 @@ class PhysicsGradientPriorEstimator(GradientPriorEstimator):
         Inclusive range of gradient bins to precompute.
     """
 
+    name = "cubic_power_prior"
+    family = "cubic_power"
+
     def __init__(
         self,
         mass_kg: float,
@@ -2032,6 +2058,9 @@ class RealisticPhysicsEstimator(GradientPriorEstimator):
     cda, crr, rho : float, optional
         Aerodynamic and rolling resistance parameters.
     """
+
+    name = "realistic_physics_prior"
+    family = "realistic_physics"
 
     def __init__(
         self,
@@ -2115,6 +2144,9 @@ class VeryRealisticPhysicsEstimator(GradientPriorEstimator):
     cda, crr, rho : float, optional
         Aerodynamic and rolling resistance parameters.
     """
+
+    name = "ftp_power_prior"
+    family = "ftp_power"
 
     def __init__(
         self,
@@ -2222,6 +2254,10 @@ class CalibratingPhysicsEstimator(BaseEstimator):
         Rider descent confidence (0-1). Default 0.65.
     """
 
+    level = 5
+    name = "self_calibrating_physics"
+    vflat_source = "online_ewma"
+
     def __init__(
         self,
         mass_kg: float,
@@ -2262,11 +2298,6 @@ class CalibratingPhysicsEstimator(BaseEstimator):
         self._headwind_kmh = headwind_kmh
         self._climb_effort = climb_effort
         self._descent_confidence = descent_confidence
-
-    def _ratio_for(self, gradient_frac: float) -> float:
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
 
     def _calibrate_vflat(self, ride: Ride) -> pd.Series:
         """Learn v_flat from observations: skip period then EWMA."""
@@ -2421,6 +2452,10 @@ class IntegralPhysicsEstimator(BaseEstimator):
         Rider descent confidence (0-1). Default 0.65.
     """
 
+    level = 5
+    name = "cumulative_integral_physics"
+    vflat_source = "fixed_vflat"
+
     def __init__(
         self,
         mass_kg: float,
@@ -2449,11 +2484,6 @@ class IntegralPhysicsEstimator(BaseEstimator):
         self._headwind_kmh = headwind_kmh
         self._climb_effort = climb_effort
         self._descent_confidence = descent_confidence
-
-    def _ratio_for(self, gradient_frac: float) -> float:
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
 
     def _integral(self, ride: Ride) -> pd.Series:
         """Cumulative predicted_time / actual_time correction factor."""
@@ -2494,35 +2524,19 @@ class IntegralPhysicsEstimator(BaseEstimator):
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
 
+        seg_speeds = np.array(
+            [self._v_flat_ms * self._ratio_for(s.gradient) for s in segments]
+        )
+        base_ttg = segment_ttg_from_row(distances, total_dist, segments, seg_speeds)
+
+        # Row-varying scalar correction applies uniformly to all remaining
+        # segments, so dividing base TTG by the per-row correction is
+        # equivalent to dividing every segment's speed.
         integral_arr = self._integral(ride).values
-
-        seg_starts = np.array([s.start_distance_m for s in segments])
-        seg_ends = np.array([s.end_distance_m for s in segments])
-        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
-
-        speeds = np.empty(len(distances))
-        for i in range(len(df)):
-            d = distances[i]
-            corr = integral_arr[i]
-
-            si = int(np.searchsorted(seg_ends, d, side="right"))
-            si = min(si, len(segments) - 1)
-
-            ttg = 0.0
-            for j in range(si, len(segments)):
-                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
-                s_len = seg_ends[j] - s_start
-                if s_len <= 0:
-                    continue
-                ttg += s_len / (self._v_flat_ms * seg_ratios[j] * corr)
-
-            remaining = total_dist - d
-            if ttg > 0 and remaining > 0:
-                speeds[i] = remaining / ttg
-            else:
-                speeds[i] = np.nan
-
-        return pd.Series(speeds, index=df.index)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ttg = base_ttg / integral_arr
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
         _, segments = decimate_to_gradient_segments(ride.df)
@@ -2588,6 +2602,10 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         Rider descent confidence (0-1). Default 0.65.
     """
 
+    level = 5
+    name = "split_climb_descent_integral_physics"
+    vflat_source = "fixed_vflat"
+
     def __init__(
         self,
         mass_kg: float,
@@ -2616,11 +2634,6 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         self._headwind_kmh = headwind_kmh
         self._climb_effort = climb_effort
         self._descent_confidence = descent_confidence
-
-    def _ratio_for(self, gradient_frac: float) -> float:
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
 
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         """Cumulative predicted/actual time corrections for climb and descent."""
@@ -2678,40 +2691,26 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
 
-        climb_int, descent_int = self._integrals(ride)
-        climb_arr = climb_int.values
-        descent_arr = descent_int.values
+        climb_arr, descent_arr = (s.values for s in self._integrals(ride))
 
-        seg_starts = np.array([s.start_distance_m for s in segments])
-        seg_ends = np.array([s.end_distance_m for s in segments])
+        # Split segment speeds into climb-only and descent-only arrays.
+        # Non-matching segments get inf speed so they contribute zero time,
+        # letting us compute climb TTG and descent TTG independently and
+        # apply their per-row corrections separately.
         seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
-        seg_is_climb = np.array([s.gradient >= 0 for s in segments])
+        is_climb = np.array([s.gradient >= 0 for s in segments])
+        base_speeds = self._v_flat_ms * seg_ratios
+        climb_speeds = np.where(is_climb, base_speeds, np.inf)
+        descent_speeds = np.where(is_climb, np.inf, base_speeds)
 
-        speeds = np.empty(len(distances))
-        for i in range(len(df)):
-            d = distances[i]
-            c_corr = climb_arr[i]
-            d_corr = descent_arr[i]
-
-            si = int(np.searchsorted(seg_ends, d, side="right"))
-            si = min(si, len(segments) - 1)
-
-            ttg = 0.0
-            for j in range(si, len(segments)):
-                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
-                s_len = seg_ends[j] - s_start
-                if s_len <= 0:
-                    continue
-                corr = c_corr if seg_is_climb[j] else d_corr
-                ttg += s_len / (self._v_flat_ms * seg_ratios[j] * corr)
-
-            remaining = total_dist - d
-            if ttg > 0 and remaining > 0:
-                speeds[i] = remaining / ttg
-            else:
-                speeds[i] = np.nan
-
-        return pd.Series(speeds, index=df.index)
+        climb_ttg = segment_ttg_from_row(distances, total_dist, segments, climb_speeds)
+        descent_ttg = segment_ttg_from_row(
+            distances, total_dist, segments, descent_speeds
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ttg = climb_ttg / climb_arr + descent_ttg / descent_arr
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
         _, segments = decimate_to_gradient_segments(ride.df)
@@ -2782,6 +2781,10 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         Aerodynamic and rolling resistance parameters.
     """
 
+    level = 5
+    name = "split_integral_ftp_power"
+    vflat_source = "fixed_vflat"
+
     def __init__(
         self,
         mass_kg: float,
@@ -2816,11 +2819,6 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         self._climb_effort = climb_effort
         self._p_max_multiplier = p_max_multiplier
         self._descent_decay_k = descent_decay_k
-
-    def _ratio_for(self, gradient_frac: float) -> float:
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
 
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         df = ride.df
@@ -2877,40 +2875,22 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         total_dist = df["distance_m"].iloc[-1]
         distances = df["distance_m"].values
 
-        climb_int, descent_int = self._integrals(ride)
-        climb_arr = climb_int.values
-        descent_arr = descent_int.values
+        climb_arr, descent_arr = (s.values for s in self._integrals(ride))
 
-        seg_starts = np.array([s.start_distance_m for s in segments])
-        seg_ends = np.array([s.end_distance_m for s in segments])
         seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
-        seg_is_climb = np.array([s.gradient >= 0 for s in segments])
+        is_climb = np.array([s.gradient >= 0 for s in segments])
+        base_speeds = self._v_flat_ms * seg_ratios
+        climb_speeds = np.where(is_climb, base_speeds, np.inf)
+        descent_speeds = np.where(is_climb, np.inf, base_speeds)
 
-        speeds = np.empty(len(distances))
-        for i in range(len(df)):
-            d = distances[i]
-            c_corr = climb_arr[i]
-            d_corr = descent_arr[i]
-
-            si = int(np.searchsorted(seg_ends, d, side="right"))
-            si = min(si, len(segments) - 1)
-
-            ttg = 0.0
-            for j in range(si, len(segments)):
-                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
-                s_len = seg_ends[j] - s_start
-                if s_len <= 0:
-                    continue
-                corr = c_corr if seg_is_climb[j] else d_corr
-                ttg += s_len / (self._v_flat_ms * seg_ratios[j] * corr)
-
-            remaining = total_dist - d
-            if ttg > 0 and remaining > 0:
-                speeds[i] = remaining / ttg
-            else:
-                speeds[i] = np.nan
-
-        return pd.Series(speeds, index=df.index)
+        climb_ttg = segment_ttg_from_row(distances, total_dist, segments, climb_speeds)
+        descent_ttg = segment_ttg_from_row(
+            distances, total_dist, segments, descent_speeds
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ttg = climb_ttg / climb_arr + descent_ttg / descent_arr
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
         _, segments = decimate_to_gradient_segments(ride.df)
@@ -3005,6 +2985,10 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
         Aerodynamic and rolling resistance parameters.
     """
 
+    level = 5
+    name = "quadrant_integral_physics"
+    vflat_source = "fixed_vflat"
+
     def __init__(
         self,
         mass_kg: float,
@@ -3076,11 +3060,6 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
         self._descent_decay_k = descent_decay_k
         self._coast_p_grav_ratio = coast_p_grav_ratio
 
-    def _ratio_for(self, gradient_frac: float) -> float:
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
-
     def _regime(self, gradient_frac: float) -> int:
         """0=coast, 1=pedal_descent, 2=sub_climb, 3=super_climb."""
         if gradient_frac < self._coast_threshold:
@@ -3133,35 +3112,25 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
 
         integrals = self._integrals(ride)  # shape (n_rows, 4)
 
-        seg_starts = np.array([s.start_distance_m for s in segments])
-        seg_ends = np.array([s.end_distance_m for s in segments])
         seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
         seg_regimes = np.array([self._regime(s.gradient) for s in segments])
+        base_speeds = self._v_flat_ms * seg_ratios
 
-        speeds = np.empty(len(distances))
-        for i in range(len(df)):
-            d = distances[i]
-            row_corr = integrals[i]  # (4,)
-
-            si = int(np.searchsorted(seg_ends, d, side="right"))
-            si = min(si, len(segments) - 1)
-
-            ttg = 0.0
-            for j in range(si, len(segments)):
-                s_start = max(seg_starts[j], d) if j == si else seg_starts[j]
-                s_len = seg_ends[j] - s_start
-                if s_len <= 0:
-                    continue
-                corr = row_corr[seg_regimes[j]]
-                ttg += s_len / (self._v_flat_ms * seg_ratios[j] * corr)
-
-            remaining = total_dist - d
-            if ttg > 0 and remaining > 0:
-                speeds[i] = remaining / ttg
-            else:
-                speeds[i] = np.nan
-
-        return pd.Series(speeds, index=df.index)
+        # One masked TTG per regime: set non-matching segments to inf so
+        # they contribute zero time. Sum regime_ttg[i] / regime_corr[i].
+        ttg = np.zeros(len(distances))
+        for r in range(4):
+            mask = seg_regimes == r
+            if not mask.any():
+                continue
+            masked_speeds = np.where(mask, base_speeds, np.inf)
+            regime_ttg = segment_ttg_from_row(
+                distances, total_dist, segments, masked_speeds
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ttg = ttg + regime_ttg / integrals[:, r]
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
 
     def predict_current(self, ride: Ride) -> pd.Series:
         _, segments = decimate_to_gradient_segments(ride.df)
@@ -3239,6 +3208,10 @@ class PIPhysicsEstimator(BaseEstimator):
         Rider behaviour parameters.
     """
 
+    level = 5
+    name = "controller_physics"
+    vflat_source = "online_pi"
+
     def __init__(
         self,
         mass_kg: float,
@@ -3279,11 +3252,6 @@ class PIPhysicsEstimator(BaseEstimator):
         self._headwind_kmh = headwind_kmh
         self._climb_effort = climb_effort
         self._descent_confidence = descent_confidence
-
-    def _ratio_for(self, gradient_frac: float) -> float:
-        bin_pct = math.floor(gradient_frac * 100)
-        bin_pct = max(min(bin_pct, max(self._ratios)), min(self._ratios))
-        return self._ratios.get(bin_pct, 1.0)
 
     def _calibrate(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         """Return (v_flat, integral_correction) per row.
@@ -3654,6 +3622,16 @@ class BinnedAdaptiveEstimator(BaseEstimator):
         Maximum |gradient| (fraction) for slow calibration. Default 0.02.
     """
 
+    level = 3
+
+    @property
+    def name(self) -> str:
+        return f"{self._prior.family}_per_bin_ewma"
+
+    @property
+    def vflat_source(self) -> str:
+        return self._prior.vflat_source
+
     def __init__(
         self,
         prior: GradientPriorEstimator,
@@ -3815,6 +3793,12 @@ class TrustedBinnedAdaptiveEstimator(BinnedAdaptiveEstimator):
     slow_span_s, fast_span_s, ramp_s, bin_size, cal_max_grad
         Passed through to `BinnedAdaptiveEstimator`.
     """
+
+    level = 4
+
+    @property
+    def name(self) -> str:
+        return f"{self._prior.family}_trusted_per_bin_ewma"
 
     def __init__(
         self,
