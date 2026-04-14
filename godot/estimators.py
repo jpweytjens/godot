@@ -1258,6 +1258,8 @@ class PriorFreeVFlat(VFlatEstimator):
         Ceiling on skip period (moving seconds). Default 300 (5 min).
     """
 
+    tag = "priorfree"
+
     def __init__(
         self,
         skip_fraction: float = 0.01,
@@ -1359,6 +1361,8 @@ class PriorFreeEwmaVFlat(VFlatEstimator):
     max_ewma_span_s : float
         Ceiling on EWMA span (seconds). Default 1800 (30 min).
     """
+
+    tag = "priorfree_ewma"
 
     def __init__(
         self,
@@ -1536,6 +1540,68 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
         ).values
         speed = v_flat_arr * seg_ratios[idx]
         return pd.Series(speed, index=df.index)
+
+
+class PriorFreePhysicsEstimator(AdaptiveGradientPriorEstimator):
+    """Realistic physics ratios with per-row v_flat from PriorFreeVFlat.
+
+    Variant A of the prior-free family: no integrals, no recalibration.
+    The ratio table (`cfg.realistic_ratios`, built once from
+    `cfg.v_flat_ms`) provides the shape; `PriorFreeVFlat` provides the
+    scale per row. Trusts the ratio table absolutely — any shape error
+    remains uncorrected, so this bets that v_flat scale error is the
+    dominant source of prediction bias on the corpus.
+    """
+
+    name = "realistic_physics_prior"
+    family = "realistic_physics"
+
+    def __init__(self, cfg: RideConfig) -> None:
+        super().__init__(
+            cfg=cfg,
+            vflat_estimator=PriorFreeVFlat(),
+            ratios=cfg.realistic_ratios,
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"prior-free realistic physics "
+            f"({ms_to_kmh(self._v_flat_init_ms):.1f} km/h init)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PriorFreePhysicsEstimator(v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r})"
+        )
+
+
+class PriorFreeFtpPhysicsEstimator(AdaptiveGradientPriorEstimator):
+    """FTP-aware physics ratios with per-row v_flat from PriorFreeVFlat.
+
+    Variant A (ftp flavor): the counterpart to `PriorFreePhysicsEstimator`
+    using `cfg.ftp_ratios`. The FTP-aware ratio table encodes the rider's
+    power ceiling on climbs and exponential descent decay, so this is
+    the direct dynamic-v_flat analogue of `VerySplitIntegralPhysicsEstimator`.
+    """
+
+    name = "ftp_power_prior"
+    family = "ftp_power"
+
+    def __init__(self, cfg: RideConfig) -> None:
+        super().__init__(
+            cfg=cfg,
+            vflat_estimator=PriorFreeVFlat(),
+            ratios=cfg.ftp_ratios,
+        )
+
+    def __str__(self) -> str:
+        return f"prior-free ftp power ({ms_to_kmh(self._v_flat_init_ms):.1f} km/h init)"
+
+    def __repr__(self) -> str:
+        return (
+            f"PriorFreeFtpPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r})"
+        )
 
 
 class GradientPriorEstimator(BaseEstimator):
