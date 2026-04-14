@@ -3294,6 +3294,15 @@ class _DynamicSplitMixin:
     def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:  # pragma: no cover
         raise NotImplementedError
 
+    def _integral_warmup_row(self, ride: Ride) -> int:
+        """First row at which the integral cumsum starts contributing.
+
+        Default 0 = integrals start from row 0 (Variant C). Variant E
+        overrides this to skip a warmup window so PriorFreeVFlat has time
+        to converge before the integral cumsum locks in any history.
+        """
+        return 0
+
     def _dynamic_state(self, ride: Ride) -> dict:
         """Run PriorFreeVFlat, build per-row ratios + integrals + ttg arrays."""
         df = ride.df
@@ -3368,6 +3377,10 @@ class _DynamicSplitMixin:
 
         # Integrals: cumsum of per-row predicted time over valid climb/descent rows
         valid = ~paused & (speed > 0.5) & (row_ratios > 0.05) & (dd > 0)
+        warmup_row = self._integral_warmup_row(ride)
+        if warmup_row > 0:
+            row_idx_arr = np.arange(n)
+            valid = valid & (row_idx_arr >= warmup_row)
         is_climb_row = grad_frac >= 0
 
         safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
@@ -3495,6 +3508,110 @@ class DynamicVerySplitPhysicsEstimator(
             f"mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"rebuild_interval_s={self._rebuild_interval_s!r})"
+        )
+
+
+class WarmupDynamicSplitPhysicsEstimator(DynamicSplitPhysicsEstimator):
+    """Variant E (realistic ratios): Variant C with a warmup-gated integral.
+
+    Identical to `DynamicSplitPhysicsEstimator` (continuous PriorFreeVFlat,
+    periodic ratio rebuild) except the climb/descent integral cumsums
+    ignore rows before a warmup_row, computed from
+    ``clip(warmup_fraction * est_time_s, min_warmup_s, max_warmup_s)``.
+
+    Built to test whether C's main weakness — early-ride v_flat
+    convergence noise getting baked into the integral cumsum — is what
+    keeps it lagging Variant D on average. The warmup gate is the same
+    mechanism Variant D uses; here we keep dynamic v_flat and dynamic
+    ratios after the gate instead of freezing them.
+    """
+
+    vflat_source = "warmup_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        rebuild_interval_s: float = 60.0,
+        warmup_fraction: float = 0.10,
+        min_warmup_s: float = 180.0,
+        max_warmup_s: float = 600.0,
+    ) -> None:
+        super().__init__(cfg, rebuild_interval_s=rebuild_interval_s)
+        self._warmup_fraction = warmup_fraction
+        self._min_warmup_s = min_warmup_s
+        self._max_warmup_s = max_warmup_s
+
+    def _integral_warmup_row(self, ride: Ride) -> int:
+        est_time_s = _estimate_ride_time_s(
+            ride.gradient_segments, self._ratios, self._v_flat_ms
+        )
+        warmup_s = max(
+            self._min_warmup_s,
+            min(self._max_warmup_s, self._warmup_fraction * est_time_s),
+        )
+        return _warmup_row(ride, warmup_s)
+
+    def __str__(self) -> str:
+        return (
+            f"warmup-dynamic split-integral physics "
+            f"(rebuild {self._rebuild_interval_s:.0f}s, "
+            f"warmup {self._warmup_fraction:.0%}, "
+            f"[{self._min_warmup_s:.0f}-{self._max_warmup_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"WarmupDynamicSplitPhysicsEstimator("
+            f"mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"rebuild_interval_s={self._rebuild_interval_s!r}, "
+            f"warmup_fraction={self._warmup_fraction!r})"
+        )
+
+
+class WarmupDynamicVerySplitPhysicsEstimator(DynamicVerySplitPhysicsEstimator):
+    """Variant E (ftp ratios): the FTP-aware counterpart."""
+
+    vflat_source = "warmup_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        rebuild_interval_s: float = 60.0,
+        warmup_fraction: float = 0.10,
+        min_warmup_s: float = 180.0,
+        max_warmup_s: float = 600.0,
+    ) -> None:
+        super().__init__(cfg, rebuild_interval_s=rebuild_interval_s)
+        self._warmup_fraction = warmup_fraction
+        self._min_warmup_s = min_warmup_s
+        self._max_warmup_s = max_warmup_s
+
+    def _integral_warmup_row(self, ride: Ride) -> int:
+        est_time_s = _estimate_ride_time_s(
+            ride.gradient_segments, self._ratios, self._v_flat_ms
+        )
+        warmup_s = max(
+            self._min_warmup_s,
+            min(self._max_warmup_s, self._warmup_fraction * est_time_s),
+        )
+        return _warmup_row(ride, warmup_s)
+
+    def __str__(self) -> str:
+        return (
+            f"warmup-dynamic very-split-integral physics "
+            f"(rebuild {self._rebuild_interval_s:.0f}s, "
+            f"warmup {self._warmup_fraction:.0%}, "
+            f"[{self._min_warmup_s:.0f}-{self._max_warmup_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"WarmupDynamicVerySplitPhysicsEstimator("
+            f"mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"rebuild_interval_s={self._rebuild_interval_s!r}, "
+            f"warmup_fraction={self._warmup_fraction!r})"
         )
 
 
