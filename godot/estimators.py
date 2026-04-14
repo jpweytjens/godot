@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import math
 from collections import deque
 from typing import TYPE_CHECKING
@@ -1601,6 +1602,210 @@ class PriorFreeFtpPhysicsEstimator(AdaptiveGradientPriorEstimator):
         return (
             f"PriorFreeFtpPhysicsEstimator("
             f"v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r})"
+        )
+
+
+def _warmup_row(ride: Ride, warmup_s: float) -> int:
+    """First row index where cumulative moving time exceeds `warmup_s`."""
+    df = ride.df
+    dt = df["delta_time"].values
+    paused = df["paused"].values
+    cum_moving = np.cumsum(np.where(~paused, dt, 0.0))
+    row = int(np.searchsorted(cum_moving, warmup_s, side="right"))
+    return min(row, len(df) - 1)
+
+
+def _estimate_ride_time_s(
+    segments: list[RouteSegment],
+    ratios: dict[int, float],
+    v_flat_ms: float,
+) -> float:
+    """Rough ride-time estimate from route segments and a ratio table."""
+    min_bin, max_bin = min(ratios), max(ratios)
+    return sum(
+        (s.end_distance_m - s.start_distance_m)
+        / max(
+            0.5,
+            v_flat_ms
+            * ratios.get(max(min_bin, min(max_bin, math.floor(s.gradient * 100))), 1.0),
+        )
+        for s in segments
+    )
+
+
+class CalibratedPhysicsEstimator(PriorFreePhysicsEstimator):
+    """Warmup with PriorFreeVFlat, then recalibrate the physics ratio table.
+
+    Variant B of the prior-free family. For the first ``warmup_s`` seconds
+    of moving time, predictions use the initial ratio table with a
+    per-row v_flat from PriorFreeVFlat (i.e. Variant A's behaviour).
+
+    At the warmup row, the current PriorFreeVFlat estimate is snapshotted
+    and fed back into the physics model to rebuild the ratio table at the
+    rider's observed operating point. From there on the estimator is
+    static: frozen v_flat, recalibrated ratios, no further v_flat updates.
+
+    The recalibration only helps if the ratio table's *shape* is
+    operating-point dependent — which is true for `realistic_ratios` and
+    `ftp_ratios`, both of which are physics models that shift between
+    drag-dominated and rolling-dominated regimes as speed changes.
+    """
+
+    level = 2
+    vflat_source = "calibrated_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        warmup_fraction: float = 0.10,
+        min_warmup_s: float = 180.0,
+        max_warmup_s: float = 600.0,
+    ) -> None:
+        super().__init__(cfg)
+        self._warmup_fraction = warmup_fraction
+        self._min_warmup_s = min_warmup_s
+        self._max_warmup_s = max_warmup_s
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:
+        """Rebuild the ratio table for a new operating point. Overridden per flavor."""
+        return new_cfg.realistic_ratios
+
+    def _calibration(
+        self, ride: Ride
+    ) -> tuple[int, pd.Series, float, dict[int, float]]:
+        """Return (warmup_row, v_flat_pre_series, v_flat_post_ms, ratios_post)."""
+        v_flat_pre = self._vflat_est.estimate(ride, self._ratios, self._v_flat_init_ms)
+
+        est_time_s = _estimate_ride_time_s(
+            ride.gradient_segments, self._ratios, self._v_flat_init_ms
+        )
+        warmup_s = max(
+            self._min_warmup_s,
+            min(self._max_warmup_s, self._warmup_fraction * est_time_s),
+        )
+        warmup_row = _warmup_row(ride, warmup_s)
+
+        v_flat_post_ms = float(v_flat_pre.iloc[warmup_row])
+        new_cfg = dataclasses.replace(self._cfg, v_flat_kmh=ms_to_kmh(v_flat_post_ms))
+        ratios_post = self._rebuild_ratios(new_cfg)
+        return warmup_row, v_flat_pre, v_flat_post_ms, ratios_post
+
+    def _physics_speed(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat: np.ndarray | float,
+    ) -> np.ndarray:
+        """Physics-ratio prediction: ttg = base_ttg / v_flat."""
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+        min_bin, max_bin = min(ratios), max(ratios)
+        seg_ratios = np.array(
+            [
+                ratios.get(
+                    max(
+                        min_bin,
+                        min(max_bin, int(math.floor(s.gradient * 100))),
+                    ),
+                    1.0,
+                )
+                for s in segments
+            ]
+        )
+        base_ttg = segment_ttg_from_row(distances, total_dist, segments, seg_ratios)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ttg = base_ttg / v_flat
+        return effective_speed_from_ttg(distances, total_dist, ttg)
+
+    def predict(self, ride: Ride) -> pd.Series:
+        warmup_row, v_flat_pre, v_flat_post_ms, ratios_post = self._calibration(ride)
+        speed_pre = self._physics_speed(ride, self._ratios, v_flat_pre.values)
+        speed_post = self._physics_speed(ride, ratios_post, v_flat_post_ms)
+        row_idx = np.arange(len(ride.df))
+        stitched = np.where(row_idx < warmup_row, speed_pre, speed_post)
+        return pd.Series(stitched, index=ride.df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        warmup_row, v_flat_pre, v_flat_post_ms, ratios_post = self._calibration(ride)
+        segments = ride.gradient_segments
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        def seg_ratio_array(ratios):
+            min_bin, max_bin = min(ratios), max(ratios)
+            return np.array(
+                [
+                    ratios.get(
+                        max(
+                            min_bin,
+                            min(max_bin, int(math.floor(s.gradient * 100))),
+                        ),
+                        1.0,
+                    )
+                    for s in segments
+                ]
+            )
+
+        speed_pre = v_flat_pre.values * seg_ratio_array(self._ratios)[idx]
+        speed_post = v_flat_post_ms * seg_ratio_array(ratios_post)[idx]
+        row_idx = np.arange(len(df))
+        stitched = np.where(row_idx < warmup_row, speed_pre, speed_post)
+        return pd.Series(stitched, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"calibrated realistic physics (warmup "
+            f"{self._warmup_fraction:.0%}, "
+            f"[{self._min_warmup_s:.0f}-{self._max_warmup_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CalibratedPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r}, "
+            f"warmup_fraction={self._warmup_fraction!r})"
+        )
+
+
+class CalibratedFtpPhysicsEstimator(CalibratedPhysicsEstimator):
+    """FTP-aware counterpart to `CalibratedPhysicsEstimator` (Variant B)."""
+
+    name = "ftp_power_prior"
+    family = "ftp_power"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        warmup_fraction: float = 0.10,
+        min_warmup_s: float = 180.0,
+        max_warmup_s: float = 600.0,
+    ) -> None:
+        super().__init__(cfg, warmup_fraction, min_warmup_s, max_warmup_s)
+        self._ratios = cfg.ftp_ratios
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:
+        return new_cfg.ftp_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"calibrated ftp power (warmup "
+            f"{self._warmup_fraction:.0%}, "
+            f"[{self._min_warmup_s:.0f}-{self._max_warmup_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CalibratedFtpPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r}, "
+            f"warmup_fraction={self._warmup_fraction!r})"
         )
 
 
