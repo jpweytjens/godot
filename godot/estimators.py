@@ -1633,6 +1633,70 @@ def _estimate_ride_time_s(
     )
 
 
+def _long_pause_triggers(ride: Ride, threshold_s: float) -> np.ndarray:
+    """Boolean mask flagging the first row after each pause longer than `threshold_s`.
+
+    A "pause" is a run of rows with ``paused=True``. The mask fires on
+    the first non-paused row after the pause ends, provided the
+    accumulated paused `delta_time` exceeded the threshold. Returns an
+    all-False mask when there are no qualifying pauses.
+    """
+    df = ride.df
+    paused = df["paused"].values.astype(bool)
+    n = len(paused)
+    trigger_mask = np.zeros(n, dtype=bool)
+    if not paused.any():
+        return trigger_mask
+    dt = df["delta_time"].values
+    in_pause = False
+    pause_dur = 0.0
+    for i in range(n):
+        if paused[i]:
+            if not in_pause:
+                in_pause = True
+                pause_dur = 0.0
+            pause_dur += float(dt[i])
+        else:
+            if in_pause:
+                if pause_dur > threshold_s:
+                    trigger_mask[i] = True
+                in_pause = False
+                pause_dur = 0.0
+    return trigger_mask
+
+
+def _decaying_cumsum(
+    values: np.ndarray, trigger_mask: np.ndarray, decay: float
+) -> np.ndarray:
+    """Cumulative sum where the running total is multiplied by `decay` at each
+    trigger row BEFORE that row's value is added.
+
+    Behaviourally: a trigger at row T downweights all accumulated
+    contributions from rows before T by a factor of `decay`, then row T
+    onward continues accumulating normally until the next trigger.
+    `decay=1.0` or an empty trigger mask both collapse to plain cumsum.
+    """
+    n = len(values)
+    if n == 0:
+        return np.zeros(0)
+    trigger_idx = np.flatnonzero(trigger_mask)
+    if len(trigger_idx) == 0 or decay == 1.0:
+        return np.cumsum(values)
+    out = np.empty(n, dtype=float)
+    running = 0.0
+    seg_bounds = np.concatenate([[0], trigger_idx, [n]]).astype(int)
+    for k in range(len(seg_bounds) - 1):
+        lo = int(seg_bounds[k])
+        hi = int(seg_bounds[k + 1])
+        if hi <= lo:
+            continue
+        if k > 0:
+            running *= decay
+        out[lo:hi] = np.cumsum(values[lo:hi]) + running
+        running = float(out[hi - 1])
+    return out
+
+
 class CalibratedPhysicsEstimator(PriorFreePhysicsEstimator):
     """Warmup with PriorFreeVFlat, then recalibrate the physics ratio table.
 
@@ -2705,6 +2769,11 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
     name = "split_climb_descent_integral_physics"
     vflat_source = "fixed_vflat"
 
+    # Default: no pause-triggered decay. Subclasses (`PauseReset*`) override
+    # `_decay_factor` and `_pause_threshold_s` to enable the mechanism.
+    _decay_factor: float = 1.0
+    _pause_threshold_s: float = 0.0
+
     def __init__(self, cfg: RideConfig) -> None:
         self._cfg = cfg
         self._v_flat_ms = cfg.v_flat_ms
@@ -2759,10 +2828,34 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
         dd_per_ratio = dd / safe_ratios
 
-        S_climb = np.cumsum(np.where(valid & is_climb, dd_per_ratio, 0.0))
-        T_climb = np.cumsum(np.where(valid & is_climb, dt, 0.0))
-        S_descent = np.cumsum(np.where(valid & ~is_climb, dd_per_ratio, 0.0))
-        T_descent = np.cumsum(np.where(valid & ~is_climb, dt, 0.0))
+        # Decaying cumsum if pause-trigger mechanism is enabled; plain cumsum
+        # otherwise (default `_decay_factor=1.0` makes `_decaying_cumsum`
+        # collapse to `np.cumsum`).
+        if self._decay_factor < 1.0 and self._pause_threshold_s > 0.0:
+            trigger_mask = _long_pause_triggers(ride, self._pause_threshold_s)
+        else:
+            trigger_mask = np.zeros(len(df), dtype=bool)
+
+        S_climb = _decaying_cumsum(
+            np.where(valid & is_climb, dd_per_ratio, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
+        T_climb = _decaying_cumsum(
+            np.where(valid & is_climb, dt, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
+        S_descent = _decaying_cumsum(
+            np.where(valid & ~is_climb, dd_per_ratio, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
+        T_descent = _decaying_cumsum(
+            np.where(valid & ~is_climb, dt, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
 
         # Avoid 0/0 at positions where no climb/descent rows have been seen
         # yet by swapping the denominator for 1.0 there — the np.where then
@@ -2874,6 +2967,55 @@ class CubicSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
         )
 
 
+class PauseResetSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
+    """Split integral physics with pause-triggered decay of accumulated history.
+
+    Identical to `SplitIntegralPhysicsEstimator` except: whenever a pause
+    lasting longer than `pause_threshold_s` ends, the running S and T
+    cumsums are all multiplied by `decay_factor`. The integral's *value*
+    is unchanged at the trigger moment (since numerator and denominator
+    scale together), but the effective *weight* of pre-pause data relative
+    to post-pause data is reduced. New observations arriving after the
+    pause have proportionally more influence on the integral than they
+    would with an infinite-memory cumsum.
+
+    Motivation: a long pause is a rider-initiated signal that something
+    has changed (refuel, lunch break, gear swap, regrouping). Rather than
+    try to auto-detect state changes from a noisy divergence signal, we
+    treat any sufficiently-long pause as a state change hint. The rider's
+    *own* decision to stop is the detector. Decaying (rather than
+    resetting) keeps pre-pause learning available while letting new data
+    dominate faster than the default expanding-mean would.
+    """
+
+    vflat_source = "pause_reset_vflat"
+    _pause_threshold_s = 300.0
+    _decay_factor = 0.3
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        pause_threshold_s: float = 300.0,
+        decay_factor: float = 0.3,
+    ) -> None:
+        super().__init__(cfg)
+        self._pause_threshold_s = pause_threshold_s
+        self._decay_factor = decay_factor
+
+    def __str__(self) -> str:
+        return (
+            f"pause-reset split-integral physics "
+            f"(pause>{self._pause_threshold_s:.0f}s, decay={self._decay_factor:.2f})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PauseResetSplitIntegralPhysicsEstimator("
+            f"pause_threshold_s={self._pause_threshold_s!r}, "
+            f"decay_factor={self._decay_factor!r})"
+        )
+
+
 class VerySplitIntegralPhysicsEstimator(BaseEstimator):
     """Split integral physics with the FTP-aware ratio model.
 
@@ -2909,6 +3051,10 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
     level = 5
     name = "split_integral_ftp_power"
     vflat_source = "fixed_vflat"
+
+    # Default: no pause-triggered decay (see SplitIntegralPhysicsEstimator).
+    _decay_factor: float = 1.0
+    _pause_threshold_s: float = 0.0
 
     def __init__(self, cfg: RideConfig) -> None:
         self._cfg = cfg
@@ -2957,10 +3103,31 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
         dd_per_ratio = dd / safe_ratios
 
-        S_climb = np.cumsum(np.where(valid & is_climb, dd_per_ratio, 0.0))
-        T_climb = np.cumsum(np.where(valid & is_climb, dt, 0.0))
-        S_descent = np.cumsum(np.where(valid & ~is_climb, dd_per_ratio, 0.0))
-        T_descent = np.cumsum(np.where(valid & ~is_climb, dt, 0.0))
+        if self._decay_factor < 1.0 and self._pause_threshold_s > 0.0:
+            trigger_mask = _long_pause_triggers(ride, self._pause_threshold_s)
+        else:
+            trigger_mask = np.zeros(len(df), dtype=bool)
+
+        S_climb = _decaying_cumsum(
+            np.where(valid & is_climb, dd_per_ratio, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
+        T_climb = _decaying_cumsum(
+            np.where(valid & is_climb, dt, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
+        S_descent = _decaying_cumsum(
+            np.where(valid & ~is_climb, dd_per_ratio, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
+        T_descent = _decaying_cumsum(
+            np.where(valid & ~is_climb, dt, 0.0),
+            trigger_mask,
+            self._decay_factor,
+        )
 
         safe_T_climb = np.where(T_climb > 0, T_climb, 1.0)
         safe_T_descent = np.where(T_descent > 0, T_descent, 1.0)
@@ -3036,6 +3203,41 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
             f"VerySplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"ftp_watts={self._ftp_watts!r})"
+        )
+
+
+class PauseResetVerySplitIntegralPhysicsEstimator(VerySplitIntegralPhysicsEstimator):
+    """FTP-aware counterpart to `PauseResetSplitIntegralPhysicsEstimator`.
+
+    Same pause-triggered decay mechanism on top of the ftp_ratios Split
+    integral. See the realistic-ratios variant for the motivation.
+    """
+
+    vflat_source = "pause_reset_vflat"
+    _pause_threshold_s = 300.0
+    _decay_factor = 0.3
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        pause_threshold_s: float = 300.0,
+        decay_factor: float = 0.3,
+    ) -> None:
+        super().__init__(cfg)
+        self._pause_threshold_s = pause_threshold_s
+        self._decay_factor = decay_factor
+
+    def __str__(self) -> str:
+        return (
+            f"pause-reset very-split-integral physics "
+            f"(pause>{self._pause_threshold_s:.0f}s, decay={self._decay_factor:.2f})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PauseResetVerySplitIntegralPhysicsEstimator("
+            f"pause_threshold_s={self._pause_threshold_s!r}, "
+            f"decay_factor={self._decay_factor!r})"
         )
 
 
