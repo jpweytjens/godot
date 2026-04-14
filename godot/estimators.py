@@ -2445,13 +2445,26 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         self._descent_confidence = cfg.descent_confidence
 
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
-        """Cumulative predicted/actual time corrections for climb and descent."""
+        """Cumulative predicted/actual time corrections for climb and descent.
+
+        Factors out as `integral[i] = S[i] / (v_flat * T[i])` where
+        `S = cumsum(dd/ratio)` and `T = cumsum(dt)` over valid climb (or
+        descent) rows. S and T are pure ride observations — v_flat only
+        enters at query time, so swapping a dynamic v_flat estimator in
+        later doesn't disturb the accumulation.
+        """
+        return self._split_integrals(ride, self._v_flat_ms)
+
+    def _split_integrals(
+        self, ride: Ride, v_flat_ms: float
+    ) -> tuple[pd.Series, pd.Series]:
         df = ride.df
         gradients, _ = _row_gradients(ride)
-        grad_pct = np.floor(gradients.values * 100).astype(int)
-        min_bin = min(self._ratios)
-        max_bin = max(self._ratios)
-        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        grad_pct = np.clip(
+            np.floor(gradients.values * 100).astype(int),
+            min(self._ratios),
+            max(self._ratios),
+        )
         row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
         grad_frac = gradients.values
 
@@ -2460,35 +2473,26 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         dt = df["delta_time"].values
         dd = df["delta_distance"].values
 
-        climb_actual_t = 0.0
-        climb_predicted_t = 0.0
-        descent_actual_t = 0.0
-        descent_predicted_t = 0.0
-        integral_climb = 1.0
-        integral_descent = 1.0
+        valid = ~paused & (speed > 0.5) & (row_ratios > 0.05) & (dd > 0)
+        is_climb = grad_frac >= 0
 
-        climb_out = np.ones(len(df))
-        descent_out = np.ones(len(df))
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        dd_per_ratio = dd / safe_ratios
 
-        for i in range(len(df)):
-            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
-                predicted_speed = self._v_flat_ms * row_ratios[i]
-                if predicted_speed > 0 and dd[i] > 0:
-                    pred_t = dd[i] / predicted_speed
-                    if grad_frac[i] >= 0:
-                        climb_actual_t += dt[i]
-                        climb_predicted_t += pred_t
-                        if climb_actual_t > 0:
-                            integral_climb = climb_predicted_t / climb_actual_t
-                    else:
-                        descent_actual_t += dt[i]
-                        descent_predicted_t += pred_t
-                        if descent_actual_t > 0:
-                            integral_descent = descent_predicted_t / descent_actual_t
+        S_climb = np.cumsum(np.where(valid & is_climb, dd_per_ratio, 0.0))
+        T_climb = np.cumsum(np.where(valid & is_climb, dt, 0.0))
+        S_descent = np.cumsum(np.where(valid & ~is_climb, dd_per_ratio, 0.0))
+        T_descent = np.cumsum(np.where(valid & ~is_climb, dt, 0.0))
 
-            climb_out[i] = integral_climb
-            descent_out[i] = integral_descent
-
+        # Avoid 0/0 at positions where no climb/descent rows have been seen
+        # yet by swapping the denominator for 1.0 there — the np.where then
+        # picks the 1.0 branch anyway, but without touching NaN.
+        safe_T_climb = np.where(T_climb > 0, T_climb, 1.0)
+        safe_T_descent = np.where(T_descent > 0, T_descent, 1.0)
+        climb_out = np.where(T_climb > 0, S_climb / (v_flat_ms * safe_T_climb), 1.0)
+        descent_out = np.where(
+            T_descent > 0, S_descent / (v_flat_ms * safe_T_descent), 1.0
+        )
         return (
             pd.Series(climb_out, index=df.index),
             pd.Series(descent_out, index=df.index),
@@ -2606,12 +2610,14 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         self._descent_decay_k = cfg.descent_decay_k
 
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        """See `SplitIntegralPhysicsEstimator._integrals` for the derivation."""
         df = ride.df
         gradients, _ = _row_gradients(ride)
-        grad_pct = np.floor(gradients.values * 100).astype(int)
-        min_bin = min(self._ratios)
-        max_bin = max(self._ratios)
-        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        grad_pct = np.clip(
+            np.floor(gradients.values * 100).astype(int),
+            min(self._ratios),
+            max(self._ratios),
+        )
         row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
         grad_frac = gradients.values
 
@@ -2620,35 +2626,24 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         dt = df["delta_time"].values
         dd = df["delta_distance"].values
 
-        climb_actual_t = 0.0
-        climb_predicted_t = 0.0
-        descent_actual_t = 0.0
-        descent_predicted_t = 0.0
-        integral_climb = 1.0
-        integral_descent = 1.0
+        valid = ~paused & (speed > 0.5) & (row_ratios > 0.05) & (dd > 0)
+        is_climb = grad_frac >= 0
 
-        climb_out = np.ones(len(df))
-        descent_out = np.ones(len(df))
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        dd_per_ratio = dd / safe_ratios
 
-        for i in range(len(df)):
-            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
-                predicted_speed = self._v_flat_ms * row_ratios[i]
-                if predicted_speed > 0 and dd[i] > 0:
-                    pred_t = dd[i] / predicted_speed
-                    if grad_frac[i] >= 0:
-                        climb_actual_t += dt[i]
-                        climb_predicted_t += pred_t
-                        if climb_actual_t > 0:
-                            integral_climb = climb_predicted_t / climb_actual_t
-                    else:
-                        descent_actual_t += dt[i]
-                        descent_predicted_t += pred_t
-                        if descent_actual_t > 0:
-                            integral_descent = descent_predicted_t / descent_actual_t
+        S_climb = np.cumsum(np.where(valid & is_climb, dd_per_ratio, 0.0))
+        T_climb = np.cumsum(np.where(valid & is_climb, dt, 0.0))
+        S_descent = np.cumsum(np.where(valid & ~is_climb, dd_per_ratio, 0.0))
+        T_descent = np.cumsum(np.where(valid & ~is_climb, dt, 0.0))
 
-            climb_out[i] = integral_climb
-            descent_out[i] = integral_descent
-
+        v_flat = self._v_flat_ms
+        safe_T_climb = np.where(T_climb > 0, T_climb, 1.0)
+        safe_T_descent = np.where(T_descent > 0, T_descent, 1.0)
+        climb_out = np.where(T_climb > 0, S_climb / (v_flat * safe_T_climb), 1.0)
+        descent_out = np.where(
+            T_descent > 0, S_descent / (v_flat * safe_T_descent), 1.0
+        )
         return (
             pd.Series(climb_out, index=df.index),
             pd.Series(descent_out, index=df.index),
