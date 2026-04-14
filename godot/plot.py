@@ -56,6 +56,21 @@ def _pause_intervals(df: pd.DataFrame, min_pause_s: float = 60.0) -> pd.DataFram
     return pd.DataFrame(intervals, columns=["start_min", "end_min"])
 
 
+def plot_resample_freq(ride_duration_s: float) -> str:
+    """Pick a resample frequency for plotting based on ride duration.
+
+    Keeps plot-point density roughly constant across ride lengths: short
+    rides stay crisp at 5s, ultras coarsen to 15s or 30s so Altair and
+    `vl-convert` aren't handed hundreds of thousands of points.
+    """
+    hours = ride_duration_s / 3600.0
+    if hours > 10.0:
+        return "30s"
+    if hours > 4.0:
+        return "15s"
+    return "5s"
+
+
 def downsample_for_plot(df: pd.DataFrame, freq: str = "5s") -> pd.DataFrame:
     """Downsample a time-indexed DataFrame for plotting.
 
@@ -738,12 +753,14 @@ def speed_comparison(
 
 
 def comparison_errors(
-    results: dict[str, pd.DataFrame], warmup_pct: float | None = None
+    results: dict[str, pd.DataFrame],
+    warmup_pct: float | None = None,
+    freq: str = "5s",
 ) -> alt.Chart:
     """Overlay ETA error lines for multiple estimators with distinct colors."""
     frames = []
     for name, result in results.items():
-        prepped = prep_time_axis(result, warmup_pct)
+        prepped = downsample_for_plot(prep_time_axis(result, warmup_pct), freq=freq)
         frames.append(prepped.assign(estimator=name, delta_min=prepped["delta_s"] / 60))
     combined = pd.concat(frames, ignore_index=True)
     palette = TOL_MUTED if len(results) > len(COLORS) else COLORS

@@ -36,6 +36,7 @@ from godot.plot import (
     error_pct_refs,
     error_refs,
     pause_bands,
+    plot_resample_freq,
     prep_time_axis,
     speed_residual_raw,
     speed_residual_smoothed,
@@ -122,14 +123,19 @@ def run(
         out_dir = Path("output") / "backtests" / ride.name
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Prepare ride data for plotting (with warmup clipped, then downsampled)
-        ride_prepped = downsample_for_plot(prep_time_axis(ride.df, warmup_pct=0.02))
+        # Prepare ride data for plotting (with warmup clipped, then downsampled).
+        # Coarsen the resample on long rides so ultras don't drown the renderer.
+        freq = plot_resample_freq(ride.total_time)
+        ride_prepped = downsample_for_plot(
+            prep_time_axis(ride.df, warmup_pct=0.02), freq=freq
+        )
         pause_df = _pause_intervals(ride_prepped)
+        bands_layer = pause_bands(ride_prepped, pause_df=pause_df)
 
         # Reference result: moving avg speed (cyan)
         ref_moving = results.get(REF_MOVING)
         ref_moving_prepped = (
-            downsample_for_plot(prep_time_axis(ref_moving, warmup_pct=0.02))
+            downsample_for_plot(prep_time_axis(ref_moving, warmup_pct=0.02), freq=freq)
             if ref_moving is not None
             else None
         )
@@ -137,7 +143,7 @@ def run(
         # Per-estimator: 5-panel stack
         for name, result in results.items():
             result_prepped = downsample_for_plot(
-                prep_time_axis(result, warmup_pct=0.02)
+                prep_time_axis(result, warmup_pct=0.02), freq=freq
             )
             is_ref = name == REF_MOVING
 
@@ -231,7 +237,7 @@ def run(
                 return lines + labels
 
             error_chart = alt.layer(
-                pause_bands(ride_prepped, pause_df=pause_df),
+                bands_layer,
                 _encoded_chart(
                     err_frames,
                     err_title,
@@ -244,7 +250,7 @@ def run(
             ).properties(width=chart_width, height=chart_height)
 
             error_pct_chart = alt.layer(
-                pause_bands(ride_prepped, pause_df=pause_df),
+                bands_layer,
                 _encoded_chart(
                     pct_frames,
                     pct_title,
@@ -258,7 +264,7 @@ def run(
 
             # Avg speed overview: estimated + actual cumulative averages
             speed_chart = alt.layer(
-                pause_bands(ride_prepped, pause_df=pause_df),
+                bands_layer,
                 avg_speed_overview(
                     ride_prepped,
                     ref_moving_df=ref_moving_prepped,
@@ -267,13 +273,13 @@ def run(
 
             # Speed residual: raw (predicted - actual)
             raw_residual_chart = alt.layer(
-                pause_bands(ride_prepped, pause_df=pause_df),
+                bands_layer,
                 speed_residual_raw(ride_prepped, result_prepped),
             ).properties(width=chart_width, height=chart_height)
 
             # Speed residual: 60s smoothed
             smooth_residual_chart = alt.layer(
-                pause_bands(ride_prepped, pause_df=pause_df),
+                bands_layer,
                 speed_residual_smoothed(ride_prepped, result_prepped),
             ).properties(width=chart_width, height=chart_height)
 
@@ -294,19 +300,19 @@ def run(
                 .properties(title=alt.Title(f"{name} \u2014 {ride.label}"))
             )
             safe_name = name.replace(" ", "_").replace("(", "").replace(")", "")
-            chart.save(str(out_dir / f"{safe_name}.png"), scale_factor=2)
+            chart.save(str(out_dir / f"{safe_name}.svg"))
 
         # Comparison: all estimators' ETA error on one chart
         comp_chart = alt.layer(
-            pause_bands(ride_prepped, pause_df=pause_df),
-            comparison_errors(results, warmup_pct=0.02),
+            bands_layer,
+            comparison_errors(results, warmup_pct=0.02, freq=freq),
             error_refs(),
         ).properties(
             title=alt.Title(f"All estimators \u2014 {ride.label}"),
             width=chart_width,
             height=comparison_height,
         )
-        comp_chart.save(str(out_dir / "comparison.png"), scale_factor=2)
+        comp_chart.save(str(out_dir / "comparison.svg"))
 
     row: dict = {
         "ride": ride.name,
