@@ -9,6 +9,7 @@ import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
 from godot.config import RideConfig
+from godot.convert import kmh_to_ms, ms_to_kmh
 from godot.estimators import (
     EwmaLockVFlat,
     FlatSpeedVFlat,
@@ -63,12 +64,12 @@ def _ground_truths(ride, gradients):
 
     total_dist = df.loc[moving, "delta_distance"].sum()
     total_time = df.loc[moving, "delta_time"].sum()
-    moving_avg = (total_dist / total_time * 3.6) if total_time > 0 else np.nan
+    moving_avg = ms_to_kmh(total_dist / total_time) if total_time > 0 else np.nan
 
     flat_mask = moving & (gradients.abs() < 0.02)
     flat_dist = df.loc[flat_mask, "delta_distance"].sum()
     flat_time = df.loc[flat_mask, "delta_time"].sum()
-    flat_avg = (flat_dist / flat_time * 3.6) if flat_time > 0 else np.nan
+    flat_avg = ms_to_kmh(flat_dist / flat_time) if flat_time > 0 else np.nan
 
     return {"moving_avg": moving_avg, "flat_avg": flat_avg}
 
@@ -85,8 +86,8 @@ def run_one(gpx_path: Path) -> list[dict]:
 
     rows = []
     for est_name, estimator, ratios in ESTIMATORS:
-        v_flat_series = estimator.estimate(ride, ratios, GLOBAL_PRIOR_KMH / 3.6)
-        v_flat_kmh = v_flat_series * 3.6
+        v_flat_series = estimator.estimate(ride, ratios, kmh_to_ms(GLOBAL_PRIOR_KMH))
+        v_flat_kmh = ms_to_kmh(v_flat_series)
 
         final_vflat = v_flat_kmh.iloc[-1]
 

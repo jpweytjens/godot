@@ -6,6 +6,7 @@ from pathlib import Path
 import gpxpy
 import numpy as np
 import pandas as pd
+from godot.convert import ms_to_kmh
 
 
 @lru_cache(maxsize=None)
@@ -154,7 +155,7 @@ def add_smooth_speed(
         Input DataFrame with speed_kmh column added.
     """
     speed_kmh = (
-        pd.Series(df["speed_ms"].values * 3.6, index=df["time"])
+        pd.Series(ms_to_kmh(df["speed_ms"].values), index=df["time"])
         .rolling(window)
         .mean()
         .fillna(0.0)

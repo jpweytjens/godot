@@ -13,6 +13,7 @@ import pandas as pd
 from godot.config import RideConfig
 from godot.segmentation import RouteSegment, decimate_to_gradient_segments
 from godot.ttg import effective_speed_from_ttg, segment_ttg_from_row
+from godot.convert import kmh_to_ms, ms_to_kmh
 
 if TYPE_CHECKING:
     from godot.ride import Ride
@@ -429,7 +430,7 @@ class LerpSpeedEstimator(BaseEstimator):
 
     def __str__(self) -> str:
         mode = "moving" if self._moving_only else "elapsed"
-        prior_kmh = self._prior_ms * 3.6
+        prior_kmh = ms_to_kmh(self._prior_ms)
         return (
             f"lerp speed (ramp={int(self._ramp_s)}s, fast={int(self._fast_span_s)}s, "
             f"w={self._fast_weight}, prior={prior_kmh:.1f}km/h, {mode})"
@@ -536,7 +537,7 @@ class AdaptiveLerpSpeedEstimator(BaseEstimator):
         self._fast_weight = fast_weight
 
     def __str__(self) -> str:
-        prior_kmh = self._prior_ms * 3.6
+        prior_kmh = ms_to_kmh(self._prior_ms)
         return (
             f"adaptive lerp (τ={int(self._tau)}s, k={self._k}, "
             f"fast={int(self._fast_span_s)}s, w={self._fast_weight}, "
@@ -740,7 +741,7 @@ class PriorEWMASpeedEstimator(BaseEstimator):
 
     def __str__(self) -> str:
         mode = "moving" if self._moving_only else "elapsed"
-        prior_kmh = self._prior_ms * 3.6
+        prior_kmh = ms_to_kmh(self._prior_ms)
         if self._alpha is not None:
             return (
                 f"EWMA+prior speed (α={self._alpha}, prior={prior_kmh:.1f}km/h, {mode})"
@@ -1039,7 +1040,7 @@ class EwmaLockVFlat(VFlatEstimator):
         self._ewma_span_s = ewma_span_s
         self._min_flat_s = min_flat_s
         self._stability_window_s = stability_window_s
-        self._lock_threshold_ms = lock_threshold_kmh / 3.6
+        self._lock_threshold_ms = kmh_to_ms(lock_threshold_kmh)
 
     def estimate(
         self,
@@ -1102,11 +1103,11 @@ class EwmaLockVFlat(VFlatEstimator):
         return result
 
     def __str__(self) -> str:
-        th = self._lock_threshold_ms * 3.6
+        th = ms_to_kmh(self._lock_threshold_ms)
         return f"ewma-lock(span={self._ewma_span_s:.0f}s, lock={th:.1f}kmh)"
 
     def __repr__(self) -> str:
-        th = self._lock_threshold_ms * 3.6
+        th = ms_to_kmh(self._lock_threshold_ms)
         return (
             f"EwmaLockVFlat(max_grad={self._max_grad!r}, "
             f"ewma_span_s={self._ewma_span_s!r}, "
@@ -1145,7 +1146,7 @@ class MedianLockVFlat(VFlatEstimator):
     ) -> None:
         self._min_obs = min_obs
         self._stability_window_obs = stability_window_obs
-        self._lock_threshold_ms = lock_threshold_kmh / 3.6
+        self._lock_threshold_ms = kmh_to_ms(lock_threshold_kmh)
 
     def estimate(
         self,
@@ -1219,11 +1220,11 @@ class MedianLockVFlat(VFlatEstimator):
         return pd.Series(out, index=df.index)
 
     def __str__(self) -> str:
-        th = self._lock_threshold_ms * 3.6
+        th = ms_to_kmh(self._lock_threshold_ms)
         return f"median-lock(min={self._min_obs}, lock={th:.1f}kmh)"
 
     def __repr__(self) -> str:
-        th = self._lock_threshold_ms * 3.6
+        th = ms_to_kmh(self._lock_threshold_ms)
         return (
             f"MedianLockVFlat(min_obs={self._min_obs!r}, "
             f"stability_window_obs={self._stability_window_obs!r}, "
@@ -1494,14 +1495,14 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
     def __str__(self) -> str:
         return (
             f"adaptive gradient prior "
-            f"({self._v_flat_init_ms * 3.6:.1f} km/h init, "
+            f"({ms_to_kmh(self._v_flat_init_ms):.1f} km/h init, "
             f"vflat={self._vflat_est})"
         )
 
     def __repr__(self) -> str:
         return (
             f"AdaptiveGradientPriorEstimator("
-            f"v_flat_kmh={self._v_flat_init_ms * 3.6!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r}, "
             f"ratios=<{len(self._ratios)} bins>, "
             f"vflat_estimator={self._vflat_est!r})"
         )
@@ -1595,11 +1596,11 @@ class GradientPriorEstimator(BaseEstimator):
         self._ratios = ratios if ratios is not None else cfg.empirical_ratios
 
     def __str__(self) -> str:
-        return f"gradient prior ({self._v_flat_ms * 3.6:.1f} km/h flat)"
+        return f"gradient prior ({ms_to_kmh(self._v_flat_ms):.1f} km/h flat)"
 
     def __repr__(self) -> str:
         return (
-            f"GradientPriorEstimator(v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"GradientPriorEstimator(v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"ratios=<{len(self._ratios)} bins>)"
         )
 
@@ -2007,14 +2008,14 @@ class PhysicsGradientPriorEstimator(GradientPriorEstimator):
 
     def __str__(self) -> str:
         return (
-            f"physics gradient prior ({self._v_flat_ms * 3.6:.1f} km/h flat, "
+            f"physics gradient prior ({ms_to_kmh(self._v_flat_ms):.1f} km/h flat, "
             f"m={self._mass_kg:.0f}kg, CdA={self._cda}, Crr={self._crr})"
         )
 
     def __repr__(self) -> str:
         return (
             f"PhysicsGradientPriorEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, cda={self._cda!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, cda={self._cda!r}, "
             f"crr={self._crr!r}, rho={self._rho!r})"
         )
 
@@ -2058,7 +2059,7 @@ class RealisticPhysicsEstimator(GradientPriorEstimator):
 
     def __str__(self) -> str:
         return (
-            f"realistic physics prior ({self._v_flat_ms * 3.6:.1f} km/h flat, "
+            f"realistic physics prior ({ms_to_kmh(self._v_flat_ms):.1f} km/h flat, "
             f"m={self._mass_kg:.0f}kg, wind={self._headwind_kmh:.0f}km/h, "
             f"effort={self._climb_effort}, conf={self._descent_confidence})"
         )
@@ -2066,7 +2067,7 @@ class RealisticPhysicsEstimator(GradientPriorEstimator):
     def __repr__(self) -> str:
         return (
             f"RealisticPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"headwind_kmh={self._headwind_kmh!r}, "
             f"climb_effort={self._climb_effort!r}, "
             f"descent_confidence={self._descent_confidence!r})"
@@ -2122,7 +2123,7 @@ class VeryRealisticPhysicsEstimator(GradientPriorEstimator):
             else f"P_max={self._p_max_multiplier}*P_flat"
         )
         return (
-            f"very realistic physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"very realistic physics ({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
             f"m={self._mass_kg:.0f}kg, {ftp_str}, "
             f"effort={self._climb_effort}, k={self._descent_decay_k})"
         )
@@ -2130,7 +2131,7 @@ class VeryRealisticPhysicsEstimator(GradientPriorEstimator):
     def __repr__(self) -> str:
         return (
             f"VeryRealisticPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"ftp_watts={self._ftp_watts!r}, "
             f"climb_effort={self._climb_effort!r}, "
             f"p_max_multiplier={self._p_max_multiplier!r}, "
@@ -2306,7 +2307,7 @@ class CalibratingPhysicsEstimator(BaseEstimator):
 
     def __str__(self) -> str:
         return (
-            f"calibrating physics ({self._v_flat_init_ms * 3.6:.1f} km/h, "
+            f"calibrating physics ({ms_to_kmh(self._v_flat_init_ms):.1f} km/h, "
             f"m={self._mass_kg:.0f}kg, "
             f"skip={self._skip_fraction:.0%}, ewma={self._ewma_fraction:.0%})"
         )
@@ -2314,7 +2315,7 @@ class CalibratingPhysicsEstimator(BaseEstimator):
     def __repr__(self) -> str:
         return (
             f"CalibratingPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_init_ms * 3.6!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r}, "
             f"skip_fraction={self._skip_fraction!r}, "
             f"ewma_fraction={self._ewma_fraction!r})"
         )
@@ -2439,14 +2440,14 @@ class IntegralPhysicsEstimator(BaseEstimator):
 
     def __str__(self) -> str:
         return (
-            f"integral physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"integral physics ({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
             f"m={self._mass_kg:.0f}kg)"
         )
 
     def __repr__(self) -> str:
         return (
             f"IntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_ms * 3.6!r})"
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r})"
         )
 
 
@@ -2597,14 +2598,14 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
 
     def __str__(self) -> str:
         return (
-            f"split-integral physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"split-integral physics ({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
             f"m={self._mass_kg:.0f}kg)"
         )
 
     def __repr__(self) -> str:
         return (
             f"SplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_ms * 3.6!r})"
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r})"
         )
 
 
@@ -2758,14 +2759,14 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
             else f"P_max={self._p_max_multiplier}*P_flat"
         )
         return (
-            f"very-split-integral physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"very-split-integral physics ({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
             f"m={self._mass_kg:.0f}kg, {ftp_str})"
         )
 
     def __repr__(self) -> str:
         return (
             f"VerySplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"ftp_watts={self._ftp_watts!r})"
         )
 
@@ -2970,7 +2971,7 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
             else f"P_max={self._p_max_multiplier}*P_flat"
         )
         return (
-            f"quad-integral physics ({self._v_flat_ms * 3.6:.1f} km/h, "
+            f"quad-integral physics ({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
             f"m={self._mass_kg:.0f}kg, {ftp_str}, "
             f"climb_tr={self._climb_threshold * 100:.1f}%, "
             f"coast_tr={self._coast_threshold * 100:.1f}%)"
@@ -2979,7 +2980,7 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
     def __repr__(self) -> str:
         return (
             f"QuadIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_ms * 3.6!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"ftp_watts={self._ftp_watts!r})"
         )
 
@@ -3180,7 +3181,7 @@ class PIPhysicsEstimator(BaseEstimator):
 
     def __str__(self) -> str:
         return (
-            f"PI physics ({self._v_flat_init_ms * 3.6:.1f} km/h, "
+            f"PI physics ({ms_to_kmh(self._v_flat_init_ms):.1f} km/h, "
             f"m={self._mass_kg:.0f}kg, "
             f"skip={self._skip_fraction:.0%}, ewma={self._ewma_fraction:.0%})"
         )
@@ -3188,7 +3189,7 @@ class PIPhysicsEstimator(BaseEstimator):
     def __repr__(self) -> str:
         return (
             f"PIPhysicsEstimator(mass_kg={self._mass_kg!r}, "
-            f"v_flat_kmh={self._v_flat_init_ms * 3.6!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_init_ms)!r}, "
             f"skip_fraction={self._skip_fraction!r}, "
             f"ewma_fraction={self._ewma_fraction!r})"
         )

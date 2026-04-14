@@ -16,6 +16,7 @@ from functools import cached_property
 from pathlib import Path
 
 import pandas as pd
+from godot.convert import kmh_to_ms
 
 
 @dataclass(frozen=True)
@@ -87,11 +88,11 @@ class RideConfig:
 
     @property
     def v_flat_ms(self) -> float:
-        return self.v_flat_kmh / 3.6
+        return kmh_to_ms(self.v_flat_kmh)
 
     @property
     def headwind_ms(self) -> float:
-        return self.headwind_kmh / 3.6
+        return kmh_to_ms(self.headwind_kmh)
 
     @cached_property
     def empirical_ratios(self) -> dict[int, float]:

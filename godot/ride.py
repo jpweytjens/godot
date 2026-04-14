@@ -19,6 +19,7 @@ from godot.gpx import (
     read_gpx,
 )
 from godot.plot import prep_time_axis
+from godot.convert import ms_to_kmh
 from tqdm.contrib.concurrent import process_map
 
 _PARSERS = {
@@ -201,7 +202,7 @@ def load_ride(
     if smooth_speed:
         df = add_smooth_speed(df, window=smooth_window)
     else:
-        df = df.assign(speed_kmh=df["speed_ms"] * 3.6)
+        df = df.assign(speed_kmh=ms_to_kmh(df["speed_ms"]))
 
     # Precompute per-row deltas
     df = df.assign(
@@ -273,7 +274,7 @@ def compute_global_prior(
     total_dist = sum(r.distance for r in rides)
     total_move_time = sum(r.ride_time for r in rides)
     prior = total_dist / total_move_time
-    logger.info(f"Global prior: {prior:.2f} m/s ({prior * 3.6:.1f} km/h)")
+    logger.info(f"Global prior: {prior:.2f} m/s ({ms_to_kmh(prior):.1f} km/h)")
     return prior
 
 

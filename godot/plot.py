@@ -8,6 +8,7 @@ from godot.gpx import pause_run_id
 from godot.palettes import GRADIENT_COLORS
 from godot.segmentation import decimate_to_gradient_segments
 from godot.theme import COLORS, TOL_BRIGHT, TOL_MUTED, TOL_VIBRANT
+from godot.convert import ms_to_kmh
 
 # ---------------------------------------------------------------------------
 # Data preparation helpers
@@ -157,7 +158,7 @@ def speed_estimated(
     stroke_width: float = 1.5,
 ) -> alt.Chart:
     """Estimated average speed line from the estimator."""
-    df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
+    df = result_df.assign(speed_kmh=ms_to_kmh(result_df["speed_ms"]))
     return (
         alt.Chart(df)
         .mark_line(
@@ -354,8 +355,8 @@ def avg_speed_overview(
     dt = ride_df["delta_time"]
     moving = ~ride_df["paused"]
     total_dist = dd.sum()
-    actual_total_kmh = total_dist / dt.sum() * 3.6
-    actual_moving_kmh = total_dist / (dt * moving).sum() * 3.6
+    actual_total_kmh = ms_to_kmh(total_dist / dt.sum())
+    actual_moving_kmh = ms_to_kmh(total_dist / (dt * moving).sum())
 
     elapsed = ride_df[["elapsed_min"]]
     frames = [
@@ -371,7 +372,7 @@ def avg_speed_overview(
     if ref_total_df is not None:
         frames.append(
             ref_total_df[["elapsed_min"]].assign(
-                speed_kmh=ref_total_df["speed_ms"] * 3.6, series="Est. total avg"
+                speed_kmh=ms_to_kmh(ref_total_df["speed_ms"]), series="Est. total avg"
             )
         )
         series.append("Est. total avg")
@@ -382,7 +383,7 @@ def avg_speed_overview(
     if ref_moving_df is not None:
         frames.append(
             ref_moving_df[["elapsed_min"]].assign(
-                speed_kmh=ref_moving_df["speed_ms"] * 3.6, series="Est. moving avg"
+                speed_kmh=ms_to_kmh(ref_moving_df["speed_ms"]), series="Est. moving avg"
             )
         )
         series.append("Est. moving avg")
@@ -442,7 +443,7 @@ def actual_speed(
         )
         frames.append(
             result_df[["elapsed_min"]].assign(
-                speed_kmh=result_df[speed_col] * 3.6, series="Estimated"
+                speed_kmh=ms_to_kmh(result_df[speed_col]), series="Estimated"
             )
         )
         series.append("Estimated")
@@ -486,10 +487,10 @@ def speed_raw(
     speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
     frames = [
         ride_df[["elapsed_min"]].assign(
-            speed_kmh=ride_df["speed_ms"] * 3.6, series="Actual"
+            speed_kmh=ms_to_kmh(ride_df["speed_ms"]), series="Actual"
         ),
         result_df[["elapsed_min"]].assign(
-            speed_kmh=result_df[speed_col] * 3.6, series="Predicted"
+            speed_kmh=ms_to_kmh(result_df[speed_col]), series="Predicted"
         ),
     ]
     series = ["Actual", "Predicted"]
@@ -547,8 +548,12 @@ def speed_smoothed_comparison(
         Time-based rolling window (default ``"60s"``).
     """
     speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
-    actual_smooth = _time_smooth(ride_df["speed_ms"] * 3.6, ride_df["time"], window)
-    pred_smooth = _time_smooth(result_df[speed_col] * 3.6, result_df["time"], window)
+    actual_smooth = _time_smooth(
+        ms_to_kmh(ride_df["speed_ms"]), ride_df["time"], window
+    )
+    pred_smooth = _time_smooth(
+        ms_to_kmh(result_df[speed_col]), result_df["time"], window
+    )
     frames = [
         ride_df[["elapsed_min"]].assign(speed_kmh=actual_smooth, series="Actual (60s)"),
         result_df[["elapsed_min"]].assign(
@@ -594,7 +599,7 @@ def speed_residual_raw(
         Estimator backtest result with `current_speed_ms` and `elapsed_min`.
     """
     speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
-    residual = (result_df[speed_col].values - ride_df["speed_ms"].values) * 3.6
+    residual = ms_to_kmh(result_df[speed_col].values - ride_df["speed_ms"].values)
     df = ride_df[["elapsed_min"]].assign(residual_kmh=residual)
     zero = (
         alt.Chart(pd.DataFrame({"y": [0]}))
@@ -634,7 +639,7 @@ def speed_residual_smoothed(
         Time-based rolling window. Default ``"60s"``.
     """
     speed_col = "current_speed_ms" if "current_speed_ms" in result_df else "speed_ms"
-    raw_residual = (result_df[speed_col].values - ride_df["speed_ms"].values) * 3.6
+    raw_residual = ms_to_kmh(result_df[speed_col].values - ride_df["speed_ms"].values)
     smooth_residual = _time_smooth(pd.Series(raw_residual), ride_df["time"], window)
     df = ride_df[["elapsed_min"]].assign(residual_kmh=smooth_residual)
     zero = (
@@ -674,7 +679,7 @@ def speed_comparison(
         When provided, shown as a third "Reference" series. When omitted,
         only actual and estimated lines are drawn.
     """
-    est_df = result_df.assign(speed_kmh=result_df["speed_ms"] * 3.6)
+    est_df = result_df.assign(speed_kmh=ms_to_kmh(result_df["speed_ms"]))
     smoothed_actual = ride_df[["elapsed_min"]].assign(
         speed_kmh=ride_df["speed_kmh"].rolling(60, min_periods=1, center=True).mean(),
         series="Actual (60s mean)",
@@ -690,7 +695,7 @@ def speed_comparison(
     widths = [0.5, 1.2, 1.5]
 
     if ref_df is not None:
-        ref_speed = ref_df.assign(speed_kmh=ref_df["speed_ms"] * 3.6)
+        ref_speed = ref_df.assign(speed_kmh=ms_to_kmh(ref_df["speed_ms"]))
         frames.append(
             ref_speed[["elapsed_min", "speed_kmh"]].assign(series="Reference")
         )
@@ -722,7 +727,7 @@ def speed_comparison(
     # Horizontal line at the ride's final total average speed
     total_s = (ride_df["time"].iloc[-1] - ride_df["time"].iloc[0]).total_seconds()
     total_avg_kmh = (
-        (ride_df["distance_m"].iloc[-1] / total_s) * 3.6 if total_s > 0 else 0.0
+        ms_to_kmh(ride_df["distance_m"].iloc[-1] / total_s) if total_s > 0 else 0.0
     )
     ref_line = (
         alt.Chart(pd.DataFrame({"y": [total_avg_kmh]}))
