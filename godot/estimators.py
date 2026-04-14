@@ -2842,6 +2842,38 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         )
 
 
+class CubicSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
+    """Split integral physics using the *pure* constant-power cubic model.
+
+    Same architecture as `SplitIntegralPhysicsEstimator` but swaps the
+    ratio table from `cfg.realistic_ratios` (behavioral tweaks — climb
+    effort scaling, descent confidence, headwind) to `cfg.cubic_power_ratios`
+    (no behavior: rider puts out the same wattage at every gradient,
+    solved by Cardano). Built specifically to A/B the "behavioral physics
+    is more shape-stable across v_flat priors than pure physics" claim
+    from the prior-sensitivity sweep.
+    """
+
+    name = "split_climb_descent_integral_cubic_physics"
+    family = "cubic_power"
+
+    def __init__(self, cfg: RideConfig) -> None:
+        super().__init__(cfg)
+        self._ratios = cfg.cubic_power_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"cubic split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h, m={self._mass_kg:.0f}kg)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CubicSplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r})"
+        )
+
+
 class VerySplitIntegralPhysicsEstimator(BaseEstimator):
     """Split integral physics with the FTP-aware ratio model.
 
