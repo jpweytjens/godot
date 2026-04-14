@@ -15,6 +15,8 @@ from godot.estimators import (
     FlatSpeedVFlat,
     MedianLockVFlat,
     OracleVFlat,
+    PriorFreeEwmaVFlat,
+    PriorFreeVFlat,
     VFlatEstimator,
     WeightedGainVFlat,
     _row_gradients,
@@ -41,6 +43,8 @@ ESTIMATORS: list[tuple[str, VFlatEstimator, dict[int, float]]] = [
     ("Weighted gain [R]", WeightedGainVFlat(), REALISTIC_RATIOS),
     ("EWMA lock [R]", EwmaLockVFlat(), REALISTIC_RATIOS),
     ("Median lock [R]", MedianLockVFlat(), REALISTIC_RATIOS),
+    ("Prior-free [R]", PriorFreeVFlat(), REALISTIC_RATIOS),
+    ("Prior-free EWMA [R]", PriorFreeEwmaVFlat(), REALISTIC_RATIOS),
 ]
 
 # Checkpoints in moving minutes
