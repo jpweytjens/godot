@@ -2726,16 +2726,21 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         return self._split_integrals(ride, self._v_flat_ms)
 
     def _split_integrals(
-        self, ride: Ride, v_flat_ms: float
+        self,
+        ride: Ride,
+        v_flat_ms: float,
+        ratios: dict[int, float] | None = None,
+        start_row: int = 0,
     ) -> tuple[pd.Series, pd.Series]:
+        ratios = ratios if ratios is not None else self._ratios
         df = ride.df
         gradients, _ = _row_gradients(ride)
         grad_pct = np.clip(
             np.floor(gradients.values * 100).astype(int),
-            min(self._ratios),
-            max(self._ratios),
+            min(ratios),
+            max(ratios),
         )
-        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+        row_ratios = np.array([ratios.get(g, 1.0) for g in grad_pct])
         grad_frac = gradients.values
 
         speed = df["speed_ms"].values
@@ -2744,6 +2749,11 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         dd = df["delta_distance"].values
 
         valid = ~paused & (speed > 0.5) & (row_ratios > 0.05) & (dd > 0)
+        # Exclude rows before `start_row` from the accumulation; callers use
+        # this for warmup-gated integrals that restart after recalibration.
+        if start_row > 0:
+            row_idx = np.arange(len(df))
+            valid = valid & (row_idx >= start_row)
         is_climb = grad_frac >= 0
 
         safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
@@ -2881,14 +2891,24 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
 
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         """See `SplitIntegralPhysicsEstimator._integrals` for the derivation."""
+        return self._split_integrals(ride, self._v_flat_ms)
+
+    def _split_integrals(
+        self,
+        ride: Ride,
+        v_flat_ms: float,
+        ratios: dict[int, float] | None = None,
+        start_row: int = 0,
+    ) -> tuple[pd.Series, pd.Series]:
+        ratios = ratios if ratios is not None else self._ratios
         df = ride.df
         gradients, _ = _row_gradients(ride)
         grad_pct = np.clip(
             np.floor(gradients.values * 100).astype(int),
-            min(self._ratios),
-            max(self._ratios),
+            min(ratios),
+            max(ratios),
         )
-        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+        row_ratios = np.array([ratios.get(g, 1.0) for g in grad_pct])
         grad_frac = gradients.values
 
         speed = df["speed_ms"].values
@@ -2897,6 +2917,9 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         dd = df["delta_distance"].values
 
         valid = ~paused & (speed > 0.5) & (row_ratios > 0.05) & (dd > 0)
+        if start_row > 0:
+            row_idx = np.arange(len(df))
+            valid = valid & (row_idx >= start_row)
         is_climb = grad_frac >= 0
 
         safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
@@ -2907,12 +2930,11 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         S_descent = np.cumsum(np.where(valid & ~is_climb, dd_per_ratio, 0.0))
         T_descent = np.cumsum(np.where(valid & ~is_climb, dt, 0.0))
 
-        v_flat = self._v_flat_ms
         safe_T_climb = np.where(T_climb > 0, T_climb, 1.0)
         safe_T_descent = np.where(T_descent > 0, T_descent, 1.0)
-        climb_out = np.where(T_climb > 0, S_climb / (v_flat * safe_T_climb), 1.0)
+        climb_out = np.where(T_climb > 0, S_climb / (v_flat_ms * safe_T_climb), 1.0)
         descent_out = np.where(
-            T_descent > 0, S_descent / (v_flat * safe_T_descent), 1.0
+            T_descent > 0, S_descent / (v_flat_ms * safe_T_descent), 1.0
         )
         return (
             pd.Series(climb_out, index=df.index),
@@ -2982,6 +3004,260 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
             f"VerySplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"ftp_watts={self._ftp_watts!r})"
+        )
+
+
+class _CalibratedSplitMixin:
+    """Shared warmup + ratio recalibration + fresh-integral logic for Variant D.
+
+    Subclasses must also inherit from a Split estimator (SplitIntegral or
+    VerySplitIntegral) and provide `_rebuild_ratios(new_cfg)`.
+
+    Flow:
+    - Rows 0..warmup_row-1: Variant A-style prediction (per-row v_flat from
+      PriorFreeVFlat, initial ratios, no integrals).
+    - At warmup_row: snapshot v_flat, rebuild the ratio table at the new
+      operating point, freeze v_flat for the rest of the ride.
+    - Rows warmup_row..N-1: Split-style prediction with the new ratios and
+      integrals that start accumulating from zero at warmup_row — no
+      pre-warmup contributions contaminate the cumsum.
+    """
+
+    _cfg: RideConfig
+    _ratios: dict[int, float]
+    _v_flat_ms: float
+    _vflat_est: VFlatEstimator
+    _warmup_fraction: float
+    _min_warmup_s: float
+    _max_warmup_s: float
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:  # pragma: no cover
+        raise NotImplementedError
+
+    def _calibration(
+        self, ride: Ride
+    ) -> tuple[int, pd.Series, float, dict[int, float]]:
+        v_flat_pre = self._vflat_est.estimate(ride, self._ratios, self._v_flat_ms)
+        est_time_s = _estimate_ride_time_s(
+            ride.gradient_segments, self._ratios, self._v_flat_ms
+        )
+        warmup_s = max(
+            self._min_warmup_s,
+            min(self._max_warmup_s, self._warmup_fraction * est_time_s),
+        )
+        warmup_row = _warmup_row(ride, warmup_s)
+        v_flat_post_ms = float(v_flat_pre.iloc[warmup_row])
+        new_cfg = dataclasses.replace(self._cfg, v_flat_kmh=ms_to_kmh(v_flat_post_ms))
+        ratios_post = self._rebuild_ratios(new_cfg)
+        return warmup_row, v_flat_pre, v_flat_post_ms, ratios_post
+
+    def _pre_warmup_speed(self, ride: Ride, v_flat_pre: pd.Series) -> np.ndarray:
+        """Variant A prediction over the whole ride using the initial ratios."""
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        base_ttg = segment_ttg_from_row(distances, total_dist, segments, seg_ratios)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ttg = base_ttg / v_flat_pre.values
+        return effective_speed_from_ttg(distances, total_dist, ttg)
+
+    def _post_warmup_speed(
+        self,
+        ride: Ride,
+        ratios_post: dict[int, float],
+        v_flat_post_ms: float,
+        warmup_row: int,
+    ) -> np.ndarray:
+        """Split prediction with recalibrated ratios and warmup-gated integrals."""
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        climb_arr, descent_arr = (
+            s.values
+            for s in self._split_integrals(
+                ride,
+                v_flat_post_ms,
+                ratios=ratios_post,
+                start_row=warmup_row,
+            )
+        )
+
+        min_bin, max_bin = min(ratios_post), max(ratios_post)
+        seg_ratios = np.array(
+            [
+                ratios_post.get(
+                    max(
+                        min_bin,
+                        min(max_bin, int(math.floor(s.gradient * 100))),
+                    ),
+                    1.0,
+                )
+                for s in segments
+            ]
+        )
+        is_climb = np.array([s.gradient >= 0 for s in segments])
+        base_speeds = v_flat_post_ms * seg_ratios
+        climb_speeds = np.where(is_climb, base_speeds, np.inf)
+        descent_speeds = np.where(is_climb, np.inf, base_speeds)
+
+        climb_ttg = segment_ttg_from_row(distances, total_dist, segments, climb_speeds)
+        descent_ttg = segment_ttg_from_row(
+            distances, total_dist, segments, descent_speeds
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ttg = climb_ttg / climb_arr + descent_ttg / descent_arr
+        return effective_speed_from_ttg(distances, total_dist, ttg)
+
+    def predict(self, ride: Ride) -> pd.Series:
+        warmup_row, v_flat_pre, v_flat_post_ms, ratios_post = self._calibration(ride)
+        speed_pre = self._pre_warmup_speed(ride, v_flat_pre)
+        speed_post = self._post_warmup_speed(
+            ride, ratios_post, v_flat_post_ms, warmup_row
+        )
+        row_idx = np.arange(len(ride.df))
+        stitched = np.where(row_idx < warmup_row, speed_pre, speed_post)
+        return pd.Series(stitched, index=ride.df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        warmup_row, v_flat_pre, v_flat_post_ms, ratios_post = self._calibration(ride)
+        segments = ride.gradient_segments
+        df = ride.df
+        distances = df["distance_m"].values
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        # Pre-warmup: Variant A-style per-row product
+        seg_ratios_pre = np.array([self._ratio_for(s.gradient) for s in segments])
+        speed_pre = v_flat_pre.values * seg_ratios_pre[idx]
+
+        # Post-warmup: frozen v_flat * ratio * integral
+        min_bin, max_bin = min(ratios_post), max(ratios_post)
+        seg_ratios_post = np.array(
+            [
+                ratios_post.get(
+                    max(
+                        min_bin,
+                        min(max_bin, int(math.floor(s.gradient * 100))),
+                    ),
+                    1.0,
+                )
+                for s in segments
+            ]
+        )
+        climb_arr, descent_arr = (
+            s.values
+            for s in self._split_integrals(
+                ride,
+                v_flat_post_ms,
+                ratios=ratios_post,
+                start_row=warmup_row,
+            )
+        )
+        is_climb_row = np.array(
+            [segments[idx[i]].gradient >= 0 for i in range(len(df))]
+        )
+        integral_at_row = np.where(is_climb_row, climb_arr, descent_arr)
+        speed_post = v_flat_post_ms * seg_ratios_post[idx] * integral_at_row
+
+        row_idx = np.arange(len(df))
+        stitched = np.where(row_idx < warmup_row, speed_pre, speed_post)
+        return pd.Series(stitched, index=df.index)
+
+
+class CalibratedSplitPhysicsEstimator(
+    _CalibratedSplitMixin, SplitIntegralPhysicsEstimator
+):
+    """Variant D with realistic physics ratios.
+
+    Combines Variant B's warmup + ratio recalibration with Split's
+    climb/descent integrals. The integrals start fresh at the warmup
+    row, so no pre-warmup noise is baked into the cumsum. Once
+    recalibrated, the integrals only absorb residual ratio-shape error
+    that the physics model at the new operating point can't explain.
+    """
+
+    level = 5
+    vflat_source = "calibrated_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        warmup_fraction: float = 0.10,
+        min_warmup_s: float = 180.0,
+        max_warmup_s: float = 600.0,
+    ) -> None:
+        super().__init__(cfg)
+        self._vflat_est = PriorFreeVFlat()
+        self._warmup_fraction = warmup_fraction
+        self._min_warmup_s = min_warmup_s
+        self._max_warmup_s = max_warmup_s
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:
+        return new_cfg.realistic_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"calibrated split-integral physics (warmup "
+            f"{self._warmup_fraction:.0%}, "
+            f"[{self._min_warmup_s:.0f}-{self._max_warmup_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CalibratedSplitPhysicsEstimator("
+            f"mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"warmup_fraction={self._warmup_fraction!r})"
+        )
+
+
+class CalibratedVerySplitPhysicsEstimator(
+    _CalibratedSplitMixin, VerySplitIntegralPhysicsEstimator
+):
+    """Variant D with FTP-aware physics ratios."""
+
+    name = "split_integral_ftp_power"
+    level = 5
+    vflat_source = "calibrated_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        warmup_fraction: float = 0.10,
+        min_warmup_s: float = 180.0,
+        max_warmup_s: float = 600.0,
+    ) -> None:
+        super().__init__(cfg)
+        self._vflat_est = PriorFreeVFlat()
+        self._warmup_fraction = warmup_fraction
+        self._min_warmup_s = min_warmup_s
+        self._max_warmup_s = max_warmup_s
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:
+        return new_cfg.ftp_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"calibrated very-split-integral physics (warmup "
+            f"{self._warmup_fraction:.0%}, "
+            f"[{self._min_warmup_s:.0f}-{self._max_warmup_s:.0f}]s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CalibratedVerySplitPhysicsEstimator("
+            f"mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"warmup_fraction={self._warmup_fraction!r})"
         )
 
 
