@@ -1305,23 +1305,22 @@ class PriorFreeVFlat(VFlatEstimator):
             min(self._max_skip_s, self._skip_fraction * est_time_s),
         )
 
-        elapsed_moving = 0.0
-        cum_sum = 0.0
-        count = 0
-        v_flat = v_flat_init_ms
-        result = np.empty(len(df))
+        # Valid rows: non-paused, moving, with a usable ratio. Moving time
+        # accumulates only over valid rows (mirrors the original loop), and
+        # `contrib_mask` only starts firing after that cumulative moving time
+        # crosses the skip threshold — so the rider's acceleration-from-zero
+        # phase doesn't contaminate the expanding mean.
+        valid_row = ~paused & (speed > 0.5) & (row_ratios > 0.05)
+        elapsed_moving = np.cumsum(np.where(valid_row, dt, 0.0))
+        contrib_mask = valid_row & (elapsed_moving > skip_s)
 
-        for i in range(len(df)):
-            if not paused[i] and speed[i] > 0.5 and row_ratios[i] > 0.05:
-                elapsed_moving += dt[i]
-                if elapsed_moving > skip_s:
-                    cum_sum += speed[i] / row_ratios[i]
-                    count += 1
-                    v_flat = cum_sum / count
-
-            result[i] = v_flat
-
-        return pd.Series(result, index=df.index)
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        contribution = np.where(contrib_mask, speed / safe_ratios, 0.0)
+        cum_sum = np.cumsum(contribution)
+        count = np.cumsum(contrib_mask.astype(np.int64))
+        safe_count = np.where(count > 0, count, 1)
+        v_flat = np.where(count > 0, cum_sum / safe_count, v_flat_init_ms)
+        return pd.Series(v_flat, index=df.index)
 
     def __str__(self) -> str:
         return (
