@@ -3261,6 +3261,243 @@ class CalibratedVerySplitPhysicsEstimator(
         )
 
 
+class _DynamicSplitMixin:
+    """Continuous v_flat + periodic ratio rebuild + Split integrals (Variant C).
+
+    Subclasses must inherit from a Split estimator and provide
+    `_rebuild_ratios(new_cfg)`. The expensive part is the ratio rebuild
+    (~480 us per call), so we rebuild every `rebuild_interval_s` seconds
+    of moving time rather than per row. PriorFreeVFlat itself drifts on
+    that same scale, so the loss of fidelity from the staggered rebuilds
+    is much smaller than the cost saved.
+
+    Within a rebuild window the ratio table is fixed, but the per-row
+    v_flat from PriorFreeVFlat still varies. The TTG calculation factors
+    out v_flat as a per-row scalar divide on top of an unscaled (ratio-
+    only) suffix sum computed once per window.
+
+    The integrals (`cum_predicted`, `T_climb`, `T_descent`) are pure
+    cumsums over the whole ride. The crucial difference from static Split:
+    `cum_predicted` has v_flat_dyn baked in per row, so it doesn't factor
+    out and the ratio of climb_ttg to climb_integral now depends on the
+    history of v_flat_dyn, not just its current value. That's what makes
+    Variant C non-trivially different from the other variants.
+    """
+
+    _cfg: RideConfig
+    _ratios: dict[int, float]
+    _v_flat_ms: float
+    _vflat_est: VFlatEstimator
+    _rebuild_interval_s: float
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:  # pragma: no cover
+        raise NotImplementedError
+
+    def _dynamic_state(self, ride: Ride) -> dict:
+        """Run PriorFreeVFlat, build per-row ratios + integrals + ttg arrays."""
+        df = ride.df
+        n = len(df)
+        distances = df["distance_m"].values
+        total_dist = float(df["distance_m"].iloc[-1])
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        gradients, _ = _row_gradients(ride)
+        grad_frac = gradients.values
+        segments = ride.gradient_segments
+        is_climb_seg = np.array([s.gradient >= 0 for s in segments])
+
+        v_flat_dyn = self._vflat_est.estimate(
+            ride, self._ratios, self._v_flat_ms
+        ).values
+        # Avoid divide-by-zero at the very start where v_flat may be 0/NaN
+        v_flat_safe = np.where(
+            (v_flat_dyn > 0) & np.isfinite(v_flat_dyn), v_flat_dyn, self._v_flat_ms
+        )
+
+        # Rebuild boundaries: every `rebuild_interval_s` seconds of moving time.
+        cum_moving = np.cumsum(np.where(~paused, dt, 0.0))
+        target_times = np.arange(
+            0.0, cum_moving[-1] + self._rebuild_interval_s, self._rebuild_interval_s
+        )
+        rebuild_starts = np.unique(
+            np.minimum(np.searchsorted(cum_moving, target_times, side="left"), n - 1)
+        )
+
+        row_ratios = np.empty(n)
+        climb_ttg_unscaled = np.empty(n)
+        descent_ttg_unscaled = np.empty(n)
+
+        for w_idx, start in enumerate(rebuild_starts):
+            end = (
+                int(rebuild_starts[w_idx + 1]) if w_idx + 1 < len(rebuild_starts) else n
+            )
+            vf = float(v_flat_safe[start])
+            new_cfg = dataclasses.replace(self._cfg, v_flat_kmh=ms_to_kmh(vf))
+            current_ratios = self._rebuild_ratios(new_cfg)
+            min_bin, max_bin = min(current_ratios), max(current_ratios)
+
+            # Per-row ratios for rows in this window
+            grad_pct_win = np.clip(
+                np.floor(grad_frac[start:end] * 100).astype(int), min_bin, max_bin
+            )
+            row_ratios[start:end] = np.array(
+                [current_ratios.get(int(g), 1.0) for g in grad_pct_win]
+            )
+
+            # Per-segment ratios for the unscaled TTG (v_flat=1) using this window's table
+            seg_grad_pct = np.clip(
+                np.array([math.floor(s.gradient * 100) for s in segments], dtype=int),
+                min_bin,
+                max_bin,
+            )
+            seg_ratios_win = np.array(
+                [current_ratios.get(int(g), 1.0) for g in seg_grad_pct]
+            )
+            climb_ratios_seg = np.where(is_climb_seg, seg_ratios_win, np.inf)
+            descent_ratios_seg = np.where(is_climb_seg, np.inf, seg_ratios_win)
+
+            climb_ttg_unscaled[start:end] = segment_ttg_from_row(
+                distances[start:end], total_dist, segments, climb_ratios_seg
+            )
+            descent_ttg_unscaled[start:end] = segment_ttg_from_row(
+                distances[start:end], total_dist, segments, descent_ratios_seg
+            )
+
+        # Integrals: cumsum of per-row predicted time over valid climb/descent rows
+        valid = ~paused & (speed > 0.5) & (row_ratios > 0.05) & (dd > 0)
+        is_climb_row = grad_frac >= 0
+
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        pred_t = dd / (v_flat_safe * safe_ratios)
+
+        cum_pred_climb = np.cumsum(np.where(valid & is_climb_row, pred_t, 0.0))
+        T_climb = np.cumsum(np.where(valid & is_climb_row, dt, 0.0))
+        cum_pred_descent = np.cumsum(np.where(valid & ~is_climb_row, pred_t, 0.0))
+        T_descent = np.cumsum(np.where(valid & ~is_climb_row, dt, 0.0))
+
+        safe_T_climb = np.where(T_climb > 0, T_climb, 1.0)
+        safe_T_descent = np.where(T_descent > 0, T_descent, 1.0)
+        climb_arr = np.where(T_climb > 0, cum_pred_climb / safe_T_climb, 1.0)
+        descent_arr = np.where(T_descent > 0, cum_pred_descent / safe_T_descent, 1.0)
+
+        return {
+            "v_flat_dyn": v_flat_dyn,
+            "v_flat_safe": v_flat_safe,
+            "row_ratios": row_ratios,
+            "climb_ttg_unscaled": climb_ttg_unscaled,
+            "descent_ttg_unscaled": descent_ttg_unscaled,
+            "climb_arr": climb_arr,
+            "descent_arr": descent_arr,
+            "is_climb_row": is_climb_row,
+        }
+
+    def predict(self, ride: Ride) -> pd.Series:
+        st = self._dynamic_state(ride)
+        df = ride.df
+        distances = df["distance_m"].values
+        total_dist = float(df["distance_m"].iloc[-1])
+
+        # Apply per-row v_flat scaling to unscaled TTG (units: m -> s)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            climb_ttg = st["climb_ttg_unscaled"] / st["v_flat_safe"]
+            descent_ttg = st["descent_ttg_unscaled"] / st["v_flat_safe"]
+            ttg = climb_ttg / st["climb_arr"] + descent_ttg / st["descent_arr"]
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        st = self._dynamic_state(ride)
+        df = ride.df
+        # Instantaneous speed = v_flat[i] * row_ratio[i] * integral_at_row[i]
+        integral_at_row = np.where(
+            st["is_climb_row"], st["climb_arr"], st["descent_arr"]
+        )
+        speed = st["v_flat_safe"] * st["row_ratios"] * integral_at_row
+        return pd.Series(speed, index=df.index)
+
+
+class DynamicSplitPhysicsEstimator(_DynamicSplitMixin, SplitIntegralPhysicsEstimator):
+    """Variant C with realistic physics ratios.
+
+    Continuous PriorFreeVFlat-driven v_flat with periodic ratio table
+    rebuild and Split's climb/descent integrals. The integrals carry
+    history of v_flat_dyn baked into the cumsum, so this is the only
+    variant where current and historical v_flat both influence the
+    final ttg — and the only one where convergence-period noise in
+    PriorFreeVFlat can persistently bias the integral.
+    """
+
+    level = 5
+    vflat_source = "online_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        rebuild_interval_s: float = 60.0,
+    ) -> None:
+        super().__init__(cfg)
+        self._vflat_est = PriorFreeVFlat()
+        self._rebuild_interval_s = rebuild_interval_s
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:
+        return new_cfg.realistic_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"dynamic split-integral physics "
+            f"(rebuild every {self._rebuild_interval_s:.0f}s moving)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"DynamicSplitPhysicsEstimator("
+            f"mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"rebuild_interval_s={self._rebuild_interval_s!r})"
+        )
+
+
+class DynamicVerySplitPhysicsEstimator(
+    _DynamicSplitMixin, VerySplitIntegralPhysicsEstimator
+):
+    """Variant C with FTP-aware physics ratios."""
+
+    name = "split_integral_ftp_power"
+    level = 5
+    vflat_source = "online_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        rebuild_interval_s: float = 60.0,
+    ) -> None:
+        super().__init__(cfg)
+        self._vflat_est = PriorFreeVFlat()
+        self._rebuild_interval_s = rebuild_interval_s
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:
+        return new_cfg.ftp_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"dynamic very-split-integral physics "
+            f"(rebuild every {self._rebuild_interval_s:.0f}s moving)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"DynamicVerySplitPhysicsEstimator("
+            f"mass_kg={self._mass_kg!r}, "
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"rebuild_interval_s={self._rebuild_interval_s!r})"
+        )
+
+
 class QuadIntegralPhysicsEstimator(BaseEstimator):
     """Four-regime integral correction on the FTP-aware physics ratios.
 
