@@ -11,6 +11,7 @@ _METRIC_META = {
     "rmse": {"suffix": "_rmse", "label": "RMSE (min)", "fmt": "{:.2f}"},
     "mpe": {"suffix": "_mpe", "label": "MPE %", "fmt": "{:.1f}"},
     "mape": {"suffix": "_mape", "label": "MAPE %", "fmt": "{:.1f}"},
+    "settle": {"suffix": "_settle", "label": "Settle (min)", "fmt": "{:.1f}"},
 }
 
 _INFO_COLS = [

@@ -329,6 +329,7 @@ def run(
         row[f"{col}_rmse"] = mv["rmse_min"]
         row[f"{col}_mpe"] = mv["mpe_pct"]
         row[f"{col}_mape"] = mv["mape_pct"]
+        row[f"{col}_settle"] = mv["settle_min"]
     return row
 
 
@@ -370,7 +371,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--metrics",
         nargs="+",
-        choices=["mae", "rmse", "mpe", "mape"],
+        choices=["mae", "rmse", "mpe", "mape", "settle"],
         default=None,
         metavar="METRIC",
         help="Metrics to display (default: all)",
@@ -378,7 +379,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.metrics is None:
-        args.metrics = ["mae", "rmse", "mpe", "mape"]
+        args.metrics = ["mae", "rmse", "mpe", "mape", "settle"]
 
     paths = [p.resolve() for p in (args.paths or list(Path("data").glob("*.gpx")))]
     if not paths:
