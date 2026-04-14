@@ -68,3 +68,13 @@ Backtest estimator keys follow: `{level}_{T|M}_{prior}_{name}`
 ## Context
 This is a Python prototype for a gradient-aware cycling ETA estimator.
 The production target is a Kotlin extension — keep algorithm logic portable.
+
+## Writing style (READMEs, docs, prose)
+- Friendly, clear, concise. Not dry academic, but technically precise.
+- Limit jargon. When a term is unavoidable, define it the first time in plain language.
+- Be very sparse with **bold**. Reserve it for genuine warnings or the one or two key terms in a section.
+- Prefer *italic* for emphasis and for introducing a name or concept.
+- Short sentences over long ones. Cut filler ("in order to", "it should be noted that").
+- Active voice. Address the reader directly when natural.
+- Code, file paths, identifiers, and CLI flags in `backticks`.
+- Avoid emoji and decorative headings unless explicitly asked.
