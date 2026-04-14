@@ -12,6 +12,112 @@ if TYPE_CHECKING:
     from godot.ride import Ride
 
 
+def compute_ride_divergence(
+    ride: Ride,
+    ratios: dict[int, float],
+    short_window_s: float = 300.0,
+    long_window_s: float = 1800.0,
+    threshold_pct: float = 15.0,
+) -> dict[str, float]:
+    """Ride-level diagnostic for rider state change.
+
+    Change-detection signal based on two rolling windows of the *same*
+    back-derived v_flat quantity (``speed/ratio``, all terrain), at
+    different timescales:
+
+    - ``v_flat_short[i]``: mean over the last ``short_window_s`` seconds
+      of moving time. Responsive to recent conditions.
+    - ``v_flat_long[i]``: mean over the last ``long_window_s`` seconds
+      of moving time. Slow-moving reference.
+
+    Because both signals apply the same ratio table to the same rows,
+    any static calibration bias in the ratio table cancels. What
+    remains in the divergence ``|short - long| / long`` is purely the
+    shift between "what the rider has been doing recently" and "what
+    they were doing ~half an hour ago." Stable conditions → two signals
+    converge. Abrupt conditions change (bonking, peloton, wind) → short
+    responds first, divergence peaks for 5–30 min, then decays as the
+    long window catches up.
+
+    Returns:
+
+    - ``divergence_max_pct``: peak divergence, post-warmup
+    - ``divergence_mean_pct``: mean of the divergence trace
+    - ``divergence_time_above_pct_s``: seconds of moving time above
+      ``threshold_pct``
+
+    All values are NaN if the ride never leaves the long-window warmup
+    (ride shorter than ``long_window_s`` of moving time).
+    """
+    from godot.estimators import _row_gradients
+
+    df = ride.df
+    n = len(df)
+    gradients, _ = _row_gradients(ride)
+    grad_pct = np.clip(
+        np.floor(gradients.values * 100).astype(int),
+        min(ratios),
+        max(ratios),
+    )
+    row_ratios = np.array([ratios.get(int(g), 1.0) for g in grad_pct])
+
+    speed = df["speed_ms"].values
+    paused = df["paused"].values
+    dt = df["delta_time"].values
+    dd = df["delta_distance"].values
+
+    valid = ~paused & (speed > 0.5) & (row_ratios > 0.05) & (dd > 0)
+    safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+
+    moving_dt = np.where(~paused, dt, 0.0)
+    cum_moving = np.cumsum(moving_dt)
+
+    row_num = np.where(valid, (speed / safe_ratios) * dt, 0.0)
+    row_den = np.where(valid, dt, 0.0)
+    cum_num = np.cumsum(row_num)
+    cum_den = np.cumsum(row_den)
+    num_pad = np.concatenate([[0.0], cum_num])
+    den_pad = np.concatenate([[0.0], cum_den])
+    i_arr = np.arange(n)
+
+    def _rolling_mean(window_s: float) -> np.ndarray:
+        target = cum_moving - window_s
+        j_i = np.searchsorted(cum_moving, target, side="right")
+        num_win = num_pad[i_arr + 1] - num_pad[j_i]
+        den_win = den_pad[i_arr + 1] - den_pad[j_i]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(den_win > 0, num_win / den_win, np.nan)
+
+    v_flat_short = _rolling_mean(short_window_s)
+    v_flat_long = _rolling_mean(long_window_s)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        divergence = (
+            np.abs(v_flat_short - v_flat_long)
+            / np.where(v_flat_long > 0, v_flat_long, 1.0)
+            * 100.0
+        )
+
+    # Skip the long-window warmup and any NaN rows.
+    warmup_ok = cum_moving >= long_window_s
+    mask = warmup_ok & np.isfinite(divergence)
+    if not mask.any():
+        return {
+            "divergence_max_pct": float("nan"),
+            "divergence_mean_pct": float("nan"),
+            "divergence_time_above_pct_s": float("nan"),
+        }
+
+    div_masked = divergence[mask]
+    dt_masked = moving_dt[mask]
+    above_mask = div_masked > threshold_pct
+    return {
+        "divergence_max_pct": float(div_masked.max()),
+        "divergence_mean_pct": float(div_masked.mean()),
+        "divergence_time_above_pct_s": float(dt_masked[above_mask].sum()),
+    }
+
+
 class Estimator(Protocol):
     """Protocol for ETA estimators used in backtesting.
 

@@ -6,7 +6,7 @@ import altair as alt
 import pandas as pd
 from tqdm.contrib.concurrent import process_map
 
-from godot.benchmark import backtest, compute_metrics
+from godot.benchmark import backtest, compute_metrics, compute_ride_divergence
 from godot.config import RideConfig
 from godot.estimators import (
     AvgSpeedEstimator,
@@ -341,6 +341,10 @@ def run(
         "route_type": ride.route_type,
         "contains_pauses": ride.contains_pauses,
     }
+    div = compute_ride_divergence(ride, CFG.realistic_ratios)
+    row["divergence_max_pct"] = div["divergence_max_pct"]
+    row["divergence_mean_pct"] = div["divergence_mean_pct"]
+    row["divergence_time_above_pct_s"] = div["divergence_time_above_pct_s"]
     warmup_m = ride.distance * 0.02
     for name, result in results.items():
         col = name.lower().replace(" ", "_")
