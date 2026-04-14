@@ -49,9 +49,6 @@ REF_MOVING_COLOR = TOL_BRIGHT[4]  # cyan
 REF_OPACITY = 0.7
 
 CFG = RideConfig()
-GRADIENT_RATIOS = CFG.empirical_ratios
-GLOBAL_PRIOR_KMH = CFG.v_flat_kmh
-REALISTIC_RATIOS = CFG.realistic_ratios
 
 
 # Estimator naming convention: L{level}_{vflat_source}_{name}
@@ -59,56 +56,22 @@ REALISTIC_RATIOS = CFG.realistic_ratios
 # `vflat_source`: fixed_vflat | online_<strategy> | oracle_vflat | none
 _ESTIMATOR_INSTANCES = [
     AvgSpeedEstimator(moving_only=True),
-    GradientPriorEstimator(v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS),
-    PhysicsGradientPriorEstimator(
-        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-    ),
-    RealisticPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
-    VeryRealisticPhysicsEstimator(
-        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-    ),
-    AdaptiveGradientPriorEstimator(
-        v_flat_kmh=GLOBAL_PRIOR_KMH,
-        ratios=GRADIENT_RATIOS,
-        vflat_estimator=WeightedGainVFlat(),
-    ),
-    BinnedAdaptiveEstimator(
-        prior=GradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS
-        ),
-    ),
-    BinnedAdaptiveEstimator(
-        prior=PhysicsGradientPriorEstimator(
-            mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-        ),
-    ),
-    TrustedBinnedAdaptiveEstimator(
-        prior=GradientPriorEstimator(
-            v_flat_kmh=GLOBAL_PRIOR_KMH, ratios=GRADIENT_RATIOS
-        ),
-    ),
-    TrustedBinnedAdaptiveEstimator(
-        prior=PhysicsGradientPriorEstimator(
-            mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-        ),
-    ),
-    TrustedBinnedAdaptiveEstimator(
-        prior=RealisticPhysicsEstimator(
-            mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-        ),
-    ),
-    CalibratingPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
-    PIPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
-    IntegralPhysicsEstimator(mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH),
-    SplitIntegralPhysicsEstimator(
-        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-    ),
-    VerySplitIntegralPhysicsEstimator(
-        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-    ),
-    QuadIntegralPhysicsEstimator(
-        mass_kg=CFG.total_mass_kg, v_flat_kmh=GLOBAL_PRIOR_KMH
-    ),
+    GradientPriorEstimator(CFG),
+    PhysicsGradientPriorEstimator(CFG),
+    RealisticPhysicsEstimator(CFG),
+    VeryRealisticPhysicsEstimator(CFG),
+    AdaptiveGradientPriorEstimator(CFG, vflat_estimator=WeightedGainVFlat()),
+    BinnedAdaptiveEstimator(CFG, prior=GradientPriorEstimator(CFG)),
+    BinnedAdaptiveEstimator(CFG, prior=PhysicsGradientPriorEstimator(CFG)),
+    TrustedBinnedAdaptiveEstimator(CFG, prior=GradientPriorEstimator(CFG)),
+    TrustedBinnedAdaptiveEstimator(CFG, prior=PhysicsGradientPriorEstimator(CFG)),
+    TrustedBinnedAdaptiveEstimator(CFG, prior=RealisticPhysicsEstimator(CFG)),
+    CalibratingPhysicsEstimator(CFG),
+    PIPhysicsEstimator(CFG),
+    IntegralPhysicsEstimator(CFG),
+    SplitIntegralPhysicsEstimator(CFG),
+    VerySplitIntegralPhysicsEstimator(CFG),
+    QuadIntegralPhysicsEstimator(CFG),
 ]
 ESTIMATORS = {est.key: (est, WallClockPause()) for est in _ESTIMATOR_INSTANCES}
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from godot.config import RideConfig
 from godot.segmentation import RouteSegment, decimate_to_gradient_segments
 from godot.ttg import effective_speed_from_ttg, segment_ttg_from_row
 
@@ -1480,13 +1481,14 @@ class AdaptiveGradientPriorEstimator(BaseEstimator):
 
     def __init__(
         self,
-        v_flat_kmh: float,
-        ratios: dict[int, float],
+        cfg: RideConfig,
         vflat_estimator: VFlatEstimator,
+        ratios: dict[int, float] | None = None,
     ) -> None:
-        self._v_flat_init_ms = v_flat_kmh / 3.6
+        self._cfg = cfg
+        self._v_flat_init_ms = cfg.v_flat_ms
         self._v_flat_ms = self._v_flat_init_ms  # compat with _ratio_for users
-        self._ratios = ratios
+        self._ratios = ratios if ratios is not None else cfg.empirical_ratios
         self._vflat_est = vflat_estimator
 
     def __str__(self) -> str:
@@ -1574,10 +1576,12 @@ class GradientPriorEstimator(BaseEstimator):
 
     Parameters
     ----------
-    v_flat_kmh : float
-        Assumed flat-ground speed in km/h.
-    ratios : dict[int, float]
-        Mapping of gradient bin (left-edge %) to speed ratio relative to flat.
+    cfg : RideConfig
+        Rider / environment configuration (supplies `v_flat_kmh`).
+    ratios : dict[int, float] or None
+        Gradient bin (left-edge %) → speed ratio. Defaults to
+        `cfg.empirical_ratios`. Subclasses override with physics-derived
+        ratio tables.
     """
 
     level = 1
@@ -1585,9 +1589,10 @@ class GradientPriorEstimator(BaseEstimator):
     vflat_source = "fixed_vflat"
     family = "empirical"
 
-    def __init__(self, v_flat_kmh: float, ratios: dict[int, float]) -> None:
-        self._v_flat_ms = v_flat_kmh / 3.6
-        self._ratios = ratios
+    def __init__(self, cfg: RideConfig, ratios: dict[int, float] | None = None) -> None:
+        self._cfg = cfg
+        self._v_flat_ms = cfg.v_flat_ms
+        self._ratios = ratios if ratios is not None else cfg.empirical_ratios
 
     def __str__(self) -> str:
         return f"gradient prior ({self._v_flat_ms * 3.6:.1f} km/h flat)"
@@ -1993,30 +1998,12 @@ class PhysicsGradientPriorEstimator(GradientPriorEstimator):
     name = "cubic_power_prior"
     family = "cubic_power"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        grad_min_pct: int = -20,
-        grad_max_pct: int = 20,
-    ) -> None:
-        ratios = physics_gradient_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            grad_min_pct=grad_min_pct,
-            grad_max_pct=grad_max_pct,
-        )
-        super().__init__(v_flat_kmh=v_flat_kmh, ratios=ratios)
-        self._mass_kg = mass_kg
-        self._cda = cda
-        self._crr = crr
-        self._rho = rho
+    def __init__(self, cfg: RideConfig) -> None:
+        super().__init__(cfg=cfg, ratios=cfg.cubic_power_ratios)
+        self._mass_kg = cfg.total_mass_kg
+        self._cda = cfg.cda
+        self._crr = cfg.crr
+        self._rho = cfg.rho
 
     def __str__(self) -> str:
         return (
@@ -2062,41 +2049,12 @@ class RealisticPhysicsEstimator(GradientPriorEstimator):
     name = "realistic_physics_prior"
     family = "realistic_physics"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        climb_effort: float = 0.5,
-        descent_confidence: float = 0.65,
-        grad_min_pct: int = -20,
-        grad_max_pct: int = 20,
-    ) -> None:
-        ratios = realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_kmh / 3.6,
-            power_watts=power_watts,
-            climb_effort=climb_effort,
-            descent_confidence=descent_confidence,
-            grad_min_pct=grad_min_pct,
-            grad_max_pct=grad_max_pct,
-        )
-        super().__init__(v_flat_kmh=v_flat_kmh, ratios=ratios)
-        self._mass_kg = mass_kg
-        self._cda = cda
-        self._crr = crr
-        self._rho = rho
-        self._headwind_kmh = headwind_kmh
-        self._climb_effort = climb_effort
-        self._descent_confidence = descent_confidence
+    def __init__(self, cfg: RideConfig) -> None:
+        super().__init__(cfg=cfg, ratios=cfg.realistic_ratios)
+        self._mass_kg = cfg.total_mass_kg
+        self._headwind_kmh = cfg.headwind_kmh
+        self._climb_effort = cfg.climb_effort
+        self._descent_confidence = cfg.descent_confidence
 
     def __str__(self) -> str:
         return (
@@ -2148,47 +2106,14 @@ class VeryRealisticPhysicsEstimator(GradientPriorEstimator):
     name = "ftp_power_prior"
     family = "ftp_power"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        ftp_watts: float | None = None,
-        climb_effort: float = 0.5,
-        p_max_multiplier: float = 1.8,
-        descent_decay_k: float = 0.4,
-        grad_min_pct: int = -20,
-        grad_max_pct: int = 20,
-    ) -> None:
-        ratios = very_realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_kmh / 3.6,
-            power_watts=power_watts,
-            ftp_watts=ftp_watts,
-            climb_effort=climb_effort,
-            p_max_multiplier=p_max_multiplier,
-            descent_decay_k=descent_decay_k,
-            grad_min_pct=grad_min_pct,
-            grad_max_pct=grad_max_pct,
-        )
-        super().__init__(v_flat_kmh=v_flat_kmh, ratios=ratios)
-        self._mass_kg = mass_kg
-        self._cda = cda
-        self._crr = crr
-        self._rho = rho
-        self._headwind_kmh = headwind_kmh
-        self._ftp_watts = ftp_watts
-        self._climb_effort = climb_effort
-        self._p_max_multiplier = p_max_multiplier
-        self._descent_decay_k = descent_decay_k
+    def __init__(self, cfg: RideConfig) -> None:
+        super().__init__(cfg=cfg, ratios=cfg.ftp_ratios)
+        self._mass_kg = cfg.total_mass_kg
+        self._headwind_kmh = cfg.headwind_kmh
+        self._ftp_watts = cfg.ftp_watts
+        self._climb_effort = cfg.climb_effort
+        self._p_max_multiplier = cfg.p_max_multiplier
+        self._descent_decay_k = cfg.descent_decay_k
 
     def __str__(self) -> str:
         ftp_str = (
@@ -2258,46 +2183,20 @@ class CalibratingPhysicsEstimator(BaseEstimator):
     name = "self_calibrating_physics"
     vflat_source = "online_ewma"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        skip_fraction: float = 0.01,
-        ewma_fraction: float = 0.10,
-        min_skip_s: float = 20.0,
-        max_skip_s: float = 300.0,
-        min_ewma_span_s: float = 120.0,
-        max_ewma_span_s: float = 3600.0,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        climb_effort: float = 0.5,
-        descent_confidence: float = 0.65,
-    ) -> None:
-        self._v_flat_init_ms = v_flat_kmh / 3.6
-        self._ratios = realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_kmh / 3.6,
-            power_watts=power_watts,
-            climb_effort=climb_effort,
-            descent_confidence=descent_confidence,
-        )
-        self._skip_fraction = skip_fraction
-        self._ewma_fraction = ewma_fraction
-        self._min_skip_s = min_skip_s
-        self._max_skip_s = max_skip_s
-        self._min_ewma_span_s = min_ewma_span_s
-        self._max_ewma_span_s = max_ewma_span_s
-        self._mass_kg = mass_kg
-        self._headwind_kmh = headwind_kmh
-        self._climb_effort = climb_effort
-        self._descent_confidence = descent_confidence
+    def __init__(self, cfg: RideConfig) -> None:
+        self._cfg = cfg
+        self._v_flat_init_ms = cfg.v_flat_ms
+        self._ratios = cfg.realistic_ratios
+        self._skip_fraction = cfg.skip_fraction
+        self._ewma_fraction = cfg.ewma_fraction
+        self._min_skip_s = cfg.min_skip_s
+        self._max_skip_s = cfg.max_skip_s
+        self._min_ewma_span_s = cfg.min_ewma_span_s
+        self._max_ewma_span_s = cfg.max_ewma_span_s
+        self._mass_kg = cfg.total_mass_kg
+        self._headwind_kmh = cfg.headwind_kmh
+        self._climb_effort = cfg.climb_effort
+        self._descent_confidence = cfg.descent_confidence
 
     def _calibrate_vflat(self, ride: Ride) -> pd.Series:
         """Learn v_flat from observations: skip period then EWMA."""
@@ -2456,34 +2355,14 @@ class IntegralPhysicsEstimator(BaseEstimator):
     name = "cumulative_integral_physics"
     vflat_source = "fixed_vflat"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        climb_effort: float = 0.5,
-        descent_confidence: float = 0.65,
-    ) -> None:
-        self._v_flat_ms = v_flat_kmh / 3.6
-        self._ratios = realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_kmh / 3.6,
-            power_watts=power_watts,
-            climb_effort=climb_effort,
-            descent_confidence=descent_confidence,
-        )
-        self._mass_kg = mass_kg
-        self._headwind_kmh = headwind_kmh
-        self._climb_effort = climb_effort
-        self._descent_confidence = descent_confidence
+    def __init__(self, cfg: RideConfig) -> None:
+        self._cfg = cfg
+        self._v_flat_ms = cfg.v_flat_ms
+        self._ratios = cfg.realistic_ratios
+        self._mass_kg = cfg.total_mass_kg
+        self._headwind_kmh = cfg.headwind_kmh
+        self._climb_effort = cfg.climb_effort
+        self._descent_confidence = cfg.descent_confidence
 
     def _integral(self, ride: Ride) -> pd.Series:
         """Cumulative predicted_time / actual_time correction factor."""
@@ -2606,34 +2485,14 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
     name = "split_climb_descent_integral_physics"
     vflat_source = "fixed_vflat"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        climb_effort: float = 0.5,
-        descent_confidence: float = 0.65,
-    ) -> None:
-        self._v_flat_ms = v_flat_kmh / 3.6
-        self._ratios = realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_kmh / 3.6,
-            power_watts=power_watts,
-            climb_effort=climb_effort,
-            descent_confidence=descent_confidence,
-        )
-        self._mass_kg = mass_kg
-        self._headwind_kmh = headwind_kmh
-        self._climb_effort = climb_effort
-        self._descent_confidence = descent_confidence
+    def __init__(self, cfg: RideConfig) -> None:
+        self._cfg = cfg
+        self._v_flat_ms = cfg.v_flat_ms
+        self._ratios = cfg.realistic_ratios
+        self._mass_kg = cfg.total_mass_kg
+        self._headwind_kmh = cfg.headwind_kmh
+        self._climb_effort = cfg.climb_effort
+        self._descent_confidence = cfg.descent_confidence
 
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         """Cumulative predicted/actual time corrections for climb and descent."""
@@ -2785,40 +2644,16 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
     name = "split_integral_ftp_power"
     vflat_source = "fixed_vflat"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        ftp_watts: float | None = None,
-        climb_effort: float = 0.5,
-        p_max_multiplier: float = 1.8,
-        descent_decay_k: float = 0.4,
-    ) -> None:
-        self._v_flat_ms = v_flat_kmh / 3.6
-        self._ratios = very_realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_kmh / 3.6,
-            power_watts=power_watts,
-            ftp_watts=ftp_watts,
-            climb_effort=climb_effort,
-            p_max_multiplier=p_max_multiplier,
-            descent_decay_k=descent_decay_k,
-        )
-        self._mass_kg = mass_kg
-        self._headwind_kmh = headwind_kmh
-        self._ftp_watts = ftp_watts
-        self._climb_effort = climb_effort
-        self._p_max_multiplier = p_max_multiplier
-        self._descent_decay_k = descent_decay_k
+    def __init__(self, cfg: RideConfig) -> None:
+        self._cfg = cfg
+        self._v_flat_ms = cfg.v_flat_ms
+        self._ratios = cfg.ftp_ratios
+        self._mass_kg = cfg.total_mass_kg
+        self._headwind_kmh = cfg.headwind_kmh
+        self._ftp_watts = cfg.ftp_watts
+        self._climb_effort = cfg.climb_effort
+        self._p_max_multiplier = cfg.p_max_multiplier
+        self._descent_decay_k = cfg.descent_decay_k
 
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         df = ride.df
@@ -2989,76 +2824,52 @@ class QuadIntegralPhysicsEstimator(BaseEstimator):
     name = "quadrant_integral_physics"
     vflat_source = "fixed_vflat"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        ftp_watts: float | None = None,
-        climb_effort: float = 0.5,
-        p_max_multiplier: float = 1.8,
-        descent_decay_k: float = 0.4,
-        coast_p_grav_ratio: float = 3.0,
-    ) -> None:
+    def __init__(self, cfg: RideConfig) -> None:
+        self._cfg = cfg
         g_const = 9.81
-        v_flat_ms = v_flat_kmh / 3.6
-        headwind_ms = headwind_kmh / 3.6
-        k_a = 0.5 * rho * cda
+        v_flat_ms = cfg.v_flat_ms
+        headwind_ms = cfg.headwind_ms
+        k_a = 0.5 * cfg.rho * cfg.cda
+        mass_kg = cfg.total_mass_kg
 
         # P_flat (same back-solve as ratios function)
-        if power_watts is not None:
-            p_flat = float(power_watts)
+        if cfg.power_watts is not None:
+            p_flat = float(cfg.power_watts)
         else:
             p_flat = (
                 k_a * (v_flat_ms + headwind_ms) ** 2 * v_flat_ms
-                + crr * mass_kg * g_const * v_flat_ms
+                + cfg.crr * mass_kg * g_const * v_flat_ms
             )
 
-        if ftp_watts is not None:
-            p_max = 1.2 * float(ftp_watts)
+        if cfg.ftp_watts is not None:
+            p_max = 1.2 * float(cfg.ftp_watts)
         else:
-            p_max = p_max_multiplier * p_flat
+            p_max = cfg.p_max_multiplier * p_flat
 
         # Transition gradients (in fraction, not percent).
         # Climb: P_flat + effort * m*g*sin(θ)*v_flat = P_max
         #   sin(θ) = (P_max - P_flat) / (effort * m * g * v_flat)
-        if climb_effort > 0:
+        if cfg.climb_effort > 0:
             sin_climb = (p_max - p_flat) / (
-                climb_effort * mass_kg * g_const * v_flat_ms
+                cfg.climb_effort * mass_kg * g_const * v_flat_ms
             )
             self._climb_threshold = max(0.0, min(0.5, sin_climb))
         else:
             self._climb_threshold = 0.0
 
         # Descent: m*g*sin(θ)*v_flat = coast_p_grav_ratio * P_flat
-        sin_coast = coast_p_grav_ratio * p_flat / (mass_kg * g_const * v_flat_ms)
+        sin_coast = cfg.coast_p_grav_ratio * p_flat / (mass_kg * g_const * v_flat_ms)
         self._coast_threshold = -max(0.0, min(0.5, sin_coast))
 
         self._v_flat_ms = v_flat_ms
-        self._ratios = very_realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_ms,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_ms,
-            power_watts=power_watts,
-            ftp_watts=ftp_watts,
-            climb_effort=climb_effort,
-            p_max_multiplier=p_max_multiplier,
-            descent_decay_k=descent_decay_k,
-        )
+        self._ratios = cfg.ftp_ratios
         self._mass_kg = mass_kg
-        self._headwind_kmh = headwind_kmh
-        self._ftp_watts = ftp_watts
-        self._climb_effort = climb_effort
-        self._p_max_multiplier = p_max_multiplier
-        self._descent_decay_k = descent_decay_k
-        self._coast_p_grav_ratio = coast_p_grav_ratio
+        self._headwind_kmh = cfg.headwind_kmh
+        self._ftp_watts = cfg.ftp_watts
+        self._climb_effort = cfg.climb_effort
+        self._p_max_multiplier = cfg.p_max_multiplier
+        self._descent_decay_k = cfg.descent_decay_k
+        self._coast_p_grav_ratio = cfg.coast_p_grav_ratio
 
     def _regime(self, gradient_frac: float) -> int:
         """0=coast, 1=pedal_descent, 2=sub_climb, 3=super_climb."""
@@ -3212,46 +3023,20 @@ class PIPhysicsEstimator(BaseEstimator):
     name = "controller_physics"
     vflat_source = "online_pi"
 
-    def __init__(
-        self,
-        mass_kg: float,
-        v_flat_kmh: float,
-        skip_fraction: float = 0.01,
-        ewma_fraction: float = 0.10,
-        min_skip_s: float = 20.0,
-        max_skip_s: float = 300.0,
-        min_ewma_span_s: float = 120.0,
-        max_ewma_span_s: float = 3600.0,
-        cda: float = 0.35,
-        crr: float = 0.005,
-        rho: float = 1.225,
-        headwind_kmh: float = 8.0,
-        power_watts: float | None = None,
-        climb_effort: float = 0.5,
-        descent_confidence: float = 0.65,
-    ) -> None:
-        self._v_flat_init_ms = v_flat_kmh / 3.6
-        self._ratios = realistic_physics_ratios(
-            mass_kg=mass_kg,
-            v_flat_ms=v_flat_kmh / 3.6,
-            cda=cda,
-            crr=crr,
-            rho=rho,
-            headwind_ms=headwind_kmh / 3.6,
-            power_watts=power_watts,
-            climb_effort=climb_effort,
-            descent_confidence=descent_confidence,
-        )
-        self._skip_fraction = skip_fraction
-        self._ewma_fraction = ewma_fraction
-        self._min_skip_s = min_skip_s
-        self._max_skip_s = max_skip_s
-        self._min_ewma_span_s = min_ewma_span_s
-        self._max_ewma_span_s = max_ewma_span_s
-        self._mass_kg = mass_kg
-        self._headwind_kmh = headwind_kmh
-        self._climb_effort = climb_effort
-        self._descent_confidence = descent_confidence
+    def __init__(self, cfg: RideConfig) -> None:
+        self._cfg = cfg
+        self._v_flat_init_ms = cfg.v_flat_ms
+        self._ratios = cfg.realistic_ratios
+        self._skip_fraction = cfg.skip_fraction
+        self._ewma_fraction = cfg.ewma_fraction
+        self._min_skip_s = cfg.min_skip_s
+        self._max_skip_s = cfg.max_skip_s
+        self._min_ewma_span_s = cfg.min_ewma_span_s
+        self._max_ewma_span_s = cfg.max_ewma_span_s
+        self._mass_kg = cfg.total_mass_kg
+        self._headwind_kmh = cfg.headwind_kmh
+        self._climb_effort = cfg.climb_effort
+        self._descent_confidence = cfg.descent_confidence
 
     def _calibrate(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         """Return (v_flat, integral_correction) per row.
@@ -3634,19 +3419,16 @@ class BinnedAdaptiveEstimator(BaseEstimator):
 
     def __init__(
         self,
+        cfg: RideConfig,
         prior: GradientPriorEstimator,
-        slow_span_s: float = 3600.0,
-        fast_span_s: float = 300.0,
-        ramp_s: float = 600.0,
-        bin_size: int = 1,
-        cal_max_grad: float = 0.02,
     ) -> None:
+        self._cfg = cfg
         self._prior = prior
-        self._slow_span_s = slow_span_s
-        self._fast_span_s = fast_span_s
-        self._ramp_s = ramp_s
-        self._bin_size = bin_size
-        self._cal_max_grad = cal_max_grad
+        self._slow_span_s = cfg.slow_span_s
+        self._fast_span_s = cfg.fast_span_s
+        self._ramp_s = cfg.ramp_s
+        self._bin_size = cfg.bin_size
+        self._cal_max_grad = cfg.cal_max_grad
 
     def __str__(self) -> str:
         cal = (
@@ -3802,29 +3584,14 @@ class TrustedBinnedAdaptiveEstimator(BinnedAdaptiveEstimator):
 
     def __init__(
         self,
+        cfg: RideConfig,
         prior: GradientPriorEstimator,
-        trust_n: int = 60,
-        trust_window_s: float | None = None,
-        corr_min: float = 0.5,
-        corr_max: float = 1.5,
-        slow_span_s: float = 3600.0,
-        fast_span_s: float = 300.0,
-        ramp_s: float = 600.0,
-        bin_size: int = 1,
-        cal_max_grad: float = 0.02,
     ) -> None:
-        super().__init__(
-            prior=prior,
-            slow_span_s=slow_span_s,
-            fast_span_s=fast_span_s,
-            ramp_s=ramp_s,
-            bin_size=bin_size,
-            cal_max_grad=cal_max_grad,
-        )
-        self._trust_n = trust_n
-        self._trust_window_s = trust_window_s
-        self._corr_min = corr_min
-        self._corr_max = corr_max
+        super().__init__(cfg=cfg, prior=prior)
+        self._trust_n = cfg.trust_n
+        self._trust_window_s = cfg.trust_window_s
+        self._corr_min = cfg.corr_min
+        self._corr_max = cfg.corr_max
 
     def __str__(self) -> str:
         cal = (
@@ -3917,8 +3684,13 @@ class OracleTrustedBinnedEstimator(TrustedBinnedAdaptiveEstimator):
         Forwarded to `TrustedBinnedAdaptiveEstimator`.
     """
 
-    def __init__(self, max_grad: float = 0.02, **kwargs) -> None:
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        cfg: RideConfig,
+        prior: GradientPriorEstimator,
+        max_grad: float = 0.02,
+    ) -> None:
+        super().__init__(cfg=cfg, prior=prior)
         self._oracle_max_grad = max_grad
 
     def _set_oracle_vflat(self, ride: Ride) -> None:
