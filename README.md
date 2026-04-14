@@ -160,3 +160,7 @@ data/               GPX/FIT ride corpus
 ## Requirements
 
 Python ≥ 3.12, managed with [uv](https://docs.astral.sh/uv/).
+
+## License
+
+Copyright 2025-2026 Johannes Weytjens. Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
