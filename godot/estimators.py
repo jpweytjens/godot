@@ -1314,6 +1314,10 @@ class PriorFreeVFlat(VFlatEstimator):
         # crosses the skip threshold — so the rider's acceleration-from-zero
         # phase doesn't contaminate the expanding mean.
         valid_row = ~paused & (speed > 0.5) & (row_ratios > 0.05)
+        # Subclass hook for extra filtering (e.g.
+        # `RelevantPriorFreeVFlat` restricts updates to samples on
+        # ETA-relevant segments).
+        valid_row = valid_row & self._row_filter(ride, ratios, v_flat_init_ms)
         elapsed_moving = np.cumsum(np.where(valid_row, dt, 0.0))
         contrib_mask = valid_row & (elapsed_moving > skip_s)
 
@@ -1331,11 +1335,75 @@ class PriorFreeVFlat(VFlatEstimator):
             f"[{self._min_skip_s:.0f}-{self._max_skip_s:.0f}]s)"
         )
 
+    def _row_filter(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> np.ndarray:
+        """Extra per-row mask hook. Default accepts every row."""
+        return np.ones(len(ride.df), dtype=bool)
+
     def __repr__(self) -> str:
         return (
             f"PriorFreeVFlat(skip_fraction={self._skip_fraction!r}, "
             f"min_skip_s={self._min_skip_s!r}, "
             f"max_skip_s={self._max_skip_s!r})"
+        )
+
+
+class RelevantPriorFreeVFlat(PriorFreeVFlat):
+    """PriorFreeVFlat gated to samples on ETA-relevant segments.
+
+    The relevance mask is computed from the VW segments and the prior
+    `v_flat_init_ms`, identical to the one used by
+    `RelevantSplitIntegralPhysicsEstimator`. Non-relevant samples
+    (short walls, brief flats, punchy descents) are excluded from the
+    expanding mean, giving a cleaner v_flat estimate on rides with
+    meaningful climbs.
+
+    Parameters
+    ----------
+    min_relevant_s : float, optional
+        Segment-time threshold for relevance. Default 120 s.
+    skip_fraction, min_skip_s, max_skip_s :
+        Inherited from `PriorFreeVFlat`.
+    """
+
+    tag = "relevant_priorfree"
+
+    def __init__(
+        self,
+        min_relevant_s: float = 120.0,
+        skip_fraction: float = 0.01,
+        min_skip_s: float = 20.0,
+        max_skip_s: float = 300.0,
+    ) -> None:
+        super().__init__(
+            skip_fraction=skip_fraction,
+            min_skip_s=min_skip_s,
+            max_skip_s=max_skip_s,
+        )
+        self._min_relevant_s = min_relevant_s
+
+    def _row_filter(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> np.ndarray:
+        return _relevant_row_mask(ride, ratios, v_flat_init_ms, self._min_relevant_s)
+
+    def __str__(self) -> str:
+        return (
+            f"relevant prior-free(t_min={self._min_relevant_s:.0f}s, "
+            f"skip={self._skip_fraction:.0%})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"RelevantPriorFreeVFlat(min_relevant_s={self._min_relevant_s!r}, "
+            f"skip_fraction={self._skip_fraction!r})"
         )
 
 
@@ -2734,6 +2802,44 @@ class IntegralPhysicsEstimator(BaseEstimator):
         )
 
 
+def _relevant_row_mask(
+    ride: Ride,
+    ratios: dict[int, float],
+    v_flat_ms: float,
+    min_relevant_s: float,
+) -> np.ndarray:
+    """Per-row mask: True where the row's VW segment is ETA-relevant.
+
+    A segment is *relevant* when its predicted traversal time at the
+    prior `v_flat_ms` exceeds `min_relevant_s`. Short walls, short
+    descents, and brief flats between features fail the test. The
+    classification is computed once from the VW segments and the prior
+    v_flat, then broadcast to each row by segment index.
+    """
+    segments = ride.gradient_segments
+    n_rows = len(ride.df)
+    if not segments:
+        return np.ones(n_rows, dtype=bool)
+
+    min_bin, max_bin = min(ratios), max(ratios)
+    seg_grad_pct = np.clip(
+        np.array([math.floor(s.gradient * 100) for s in segments], dtype=int),
+        min_bin,
+        max_bin,
+    )
+    seg_ratios = np.array([ratios.get(int(g), 1.0) for g in seg_grad_pct])
+    seg_lengths = np.array([s.end_distance_m - s.start_distance_m for s in segments])
+    seg_speeds = v_flat_ms * seg_ratios
+    with np.errstate(divide="ignore", invalid="ignore"):
+        seg_times = np.where(seg_speeds > 0, seg_lengths / seg_speeds, np.inf)
+    seg_relevant = seg_times >= min_relevant_s
+
+    seg_ends = np.array([s.end_distance_m for s in segments])
+    distances = ride.df["distance_m"].to_numpy()
+    idx = np.searchsorted(seg_ends, distances, side="left").clip(max=len(segments) - 1)
+    return seg_relevant[idx]
+
+
 class SplitIntegralPhysicsEstimator(BaseEstimator):
     """Gradient-aware ETA with separate climb/descent integral corrections.
 
@@ -2982,26 +3088,9 @@ class RelevantSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
         self._min_relevant_s = min_relevant_s
 
     def _extra_row_mask(self, ride: Ride) -> np.ndarray:
-        segments = ride.gradient_segments
-        n_rows = len(ride.df)
-        if not segments:
-            return np.ones(n_rows, dtype=bool)
-
-        seg_lengths = np.array(
-            [s.end_distance_m - s.start_distance_m for s in segments]
+        return _relevant_row_mask(
+            ride, self._ratios, self._v_flat_ms, self._min_relevant_s
         )
-        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
-        seg_speeds = self._v_flat_ms * seg_ratios
-        with np.errstate(divide="ignore", invalid="ignore"):
-            seg_times = np.where(seg_speeds > 0, seg_lengths / seg_speeds, np.inf)
-        seg_relevant = seg_times >= self._min_relevant_s
-
-        seg_ends = np.array([s.end_distance_m for s in segments])
-        distances = ride.df["distance_m"].to_numpy()
-        idx = np.searchsorted(seg_ends, distances, side="left").clip(
-            max=len(segments) - 1
-        )
-        return seg_relevant[idx]
 
     def __str__(self) -> str:
         return (
@@ -3698,6 +3787,11 @@ class _DynamicSplitMixin:
         if warmup_row > 0:
             row_idx_arr = np.arange(n)
             valid = valid & (row_idx_arr >= warmup_row)
+        # Gate updates through the subclass hook (default all-True on the
+        # parent SplitIntegralPhysicsEstimator; overridden by the
+        # `RelevantDynamicSplitPhysicsEstimator` to filter to relevant VW
+        # segments only).
+        valid = valid & self._extra_row_mask(ride)
         is_climb_row = grad_frac >= 0
 
         safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
@@ -3824,6 +3918,111 @@ class DynamicVerySplitPhysicsEstimator(
             f"DynamicVerySplitPhysicsEstimator("
             f"mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"rebuild_interval_s={self._rebuild_interval_s!r})"
+        )
+
+
+class RelevantIntegralDynamicSplitPhysicsEstimator(DynamicSplitPhysicsEstimator):
+    """Dynamic split-integral physics with relevance-gated integrals only.
+
+    Same as `DynamicSplitPhysicsEstimator` — continuous `PriorFreeVFlat`,
+    periodic ratio rebuild from the current v_flat — but `c_up` / `c_dn`
+    only accumulate from samples on ETA-relevant VW segments. v_flat is
+    *not* filtered: `PriorFreeVFlat`'s `/ratio(g)` normalisation already
+    handles gradient dependence and benefits from every sample.
+
+    Rationale: `c_up` / `c_dn` want *regime-matched* samples (only learn
+    from climbs similar to what's upcoming), so gating helps. v_flat
+    wants *maximum-signal* samples, so gating hurts — cutting the pool
+    10-20× on a mountain ride turns PriorFreeVFlat noisy and the
+    ratio-table rebuild propagates that noise everywhere.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    min_relevant_s : float, optional
+        Segment-time threshold for relevance. Default 120 s.
+    rebuild_interval_s : float, optional
+        How often to rebuild the ratio table from the current v_flat
+        estimate. Default 60 s.
+    """
+
+    name = "relevant_integral_split_integral_physics"
+    level = 5
+    vflat_source = "online_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        min_relevant_s: float = 120.0,
+        rebuild_interval_s: float = 60.0,
+    ) -> None:
+        super().__init__(cfg, rebuild_interval_s=rebuild_interval_s)
+        self._min_relevant_s = min_relevant_s
+
+    def _extra_row_mask(self, ride: Ride) -> np.ndarray:
+        return _relevant_row_mask(
+            ride, self._ratios, self._v_flat_ms, self._min_relevant_s
+        )
+
+    def __str__(self) -> str:
+        return (
+            f"relevant-integral dynamic split "
+            f"(t_min={self._min_relevant_s:.0f}s, "
+            f"rebuild every {self._rebuild_interval_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"RelevantIntegralDynamicSplitPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"min_relevant_s={self._min_relevant_s!r}, "
+            f"rebuild_interval_s={self._rebuild_interval_s!r})"
+        )
+
+
+class RelevantDynamicSplitPhysicsEstimator(
+    RelevantIntegralDynamicSplitPhysicsEstimator
+):
+    """Dynamic split-integral physics with *both* v_flat and integrals gated.
+
+    Extends `RelevantIntegralDynamicSplitPhysicsEstimator` by also
+    swapping the v_flat estimator for `RelevantPriorFreeVFlat`. Empirically
+    *worse* than the integral-only gating because starving the
+    `PriorFreeVFlat` sample pool hurts v_flat quality more than gating
+    helps it. Kept for comparison and for cases where the relevance
+    filter is loose enough that v_flat still has a reasonable sample
+    count.
+    """
+
+    name = "relevant_vflat_split_integral_physics"
+    vflat_source = "online_relevant_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        min_relevant_s: float = 120.0,
+        rebuild_interval_s: float = 60.0,
+    ) -> None:
+        super().__init__(
+            cfg,
+            min_relevant_s=min_relevant_s,
+            rebuild_interval_s=rebuild_interval_s,
+        )
+        self._vflat_est = RelevantPriorFreeVFlat(min_relevant_s=min_relevant_s)
+
+    def __str__(self) -> str:
+        return (
+            f"relevant dynamic split "
+            f"(v_flat+integrals gated, t_min={self._min_relevant_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"RelevantDynamicSplitPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"min_relevant_s={self._min_relevant_s!r}, "
             f"rebuild_interval_s={self._rebuild_interval_s!r})"
         )
 

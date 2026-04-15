@@ -18,6 +18,8 @@ import pandas as pd
 from godot.benchmark import backtest, compute_metrics
 from godot.config import RideConfig
 from godot.estimators import (
+    RelevantDynamicSplitPhysicsEstimator,
+    RelevantIntegralDynamicSplitPhysicsEstimator,
     RelevantSplitIntegralPhysicsEstimator,
     SplitIntegralPhysicsEstimator,
 )
@@ -112,6 +114,22 @@ def main() -> None:
                 "Relevant",
                 f"{t:.0f}",
                 RelevantSplitIntegralPhysicsEstimator(cfg, min_relevant_s=t),
+            )
+        )
+    for t in args.thresholds:
+        variants.append(
+            (
+                "RelInt+Dyn",
+                f"{t:.0f}",
+                RelevantIntegralDynamicSplitPhysicsEstimator(cfg, min_relevant_s=t),
+            )
+        )
+    for t in args.thresholds:
+        variants.append(
+            (
+                "RelDyn(both)",
+                f"{t:.0f}",
+                RelevantDynamicSplitPhysicsEstimator(cfg, min_relevant_s=t),
             )
         )
 
