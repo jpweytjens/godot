@@ -46,7 +46,11 @@ v(g) = v_flat · r(g)
 
 Once mass, CdA, Crr, and the behavioural coefficients are fixed, `r(g)` is fully determined by a single parameter: `v_flat`.
 
-> 📈 *TODO: plot of `r(g)` for a representative rider, with and without behavioural terms, over `g ∈ [-15%, +15%]`.*
+![Speed ratio vs gradient](scripts/gradient_curve.svg)
+
+![Rider power vs gradient](scripts/power_curve.svg)
+
+The *constant power* curve is what you get from pure physics — same wattage at every gradient. The *freewheel model* adds linear climb effort (unbounded) and a hard freewheel cap on descents. The *FTP model* caps climb power at `1.2 · FTP` and decays descent power exponentially. The power plot is the same two behavioural models with the cubic solver stripped out: just `P(g)/P(0)` vs gradient.
 
 ## The Godot estimator
 
