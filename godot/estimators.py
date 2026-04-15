@@ -2794,6 +2794,15 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         """
         return self._split_integrals(ride, self._v_flat_ms)
 
+    def _extra_row_mask(self, ride: Ride) -> np.ndarray:
+        """Per-row mask gating which rows feed the split integrals.
+
+        Default: accept everything. Overridden by
+        `RelevantSplitIntegralPhysicsEstimator` to accept only rows whose
+        segment is ETA-relevant at the prior `v_flat`.
+        """
+        return np.ones(len(ride.df), dtype=bool)
+
     def _split_integrals(
         self,
         ride: Ride,
@@ -2823,6 +2832,10 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         if start_row > 0:
             row_idx = np.arange(len(df))
             valid = valid & (row_idx >= start_row)
+        # Subclass hook: restrict which rows feed the integrals. Default
+        # returns all-True; `RelevantSplitIntegralPhysicsEstimator` uses this
+        # to gate updates on ETA-relevant VW segments only.
+        valid = valid & self._extra_row_mask(ride)
         is_climb = grad_frac >= 0
 
         safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
@@ -2932,6 +2945,76 @@ class SplitIntegralPhysicsEstimator(BaseEstimator):
         return (
             f"SplitIntegralPhysicsEstimator(mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r})"
+        )
+
+
+class RelevantSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
+    """Split-integral physics estimator that only learns from relevant segments.
+
+    A VW segment is *relevant* when its predicted traversal time at the
+    prior `v_flat` exceeds `min_relevant_s`. Short walls, short descents,
+    and short flat stretches between features contribute to predictions
+    but do not feed the climb/descent integral corrections. This closes
+    the contamination path where a brief punchy effort biases `c_up` for
+    the rest of the ride.
+
+    The prior `v_flat` from `cfg.v_flat_kmh` is only used for segment
+    classification — the actual speed prediction still goes through the
+    regular split integrals, which refine `c_up` and `c_dn` online from
+    the relevant-segment samples.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    min_relevant_s : float, optional
+        Minimum predicted traversal time for a segment to count as
+        relevant. Default 120 s (2 min) — long enough that rider pacing
+        behaviour dominates punchy-effort dynamics; on the GPX corpus
+        this value produces the best mae_mean and the fastest settle
+        time, beating 180 s by ~10 min of convergence time.
+    """
+
+    name = "relevant_split_integral_physics"
+
+    def __init__(self, cfg: RideConfig, min_relevant_s: float = 120.0) -> None:
+        super().__init__(cfg)
+        self._min_relevant_s = min_relevant_s
+
+    def _extra_row_mask(self, ride: Ride) -> np.ndarray:
+        segments = ride.gradient_segments
+        n_rows = len(ride.df)
+        if not segments:
+            return np.ones(n_rows, dtype=bool)
+
+        seg_lengths = np.array(
+            [s.end_distance_m - s.start_distance_m for s in segments]
+        )
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        seg_speeds = self._v_flat_ms * seg_ratios
+        with np.errstate(divide="ignore", invalid="ignore"):
+            seg_times = np.where(seg_speeds > 0, seg_lengths / seg_speeds, np.inf)
+        seg_relevant = seg_times >= self._min_relevant_s
+
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = ride.df["distance_m"].to_numpy()
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+        return seg_relevant[idx]
+
+    def __str__(self) -> str:
+        return (
+            f"relevant split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h prior, "
+            f"t_min={self._min_relevant_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"RelevantSplitIntegralPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"min_relevant_s={self._min_relevant_s!r})"
         )
 
 

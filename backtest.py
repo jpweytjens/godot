@@ -32,6 +32,7 @@ from godot.estimators import (
     IntegralPhysicsEstimator,
     PriorFreeFtpPhysicsEstimator,
     PriorFreePhysicsEstimator,
+    RelevantSplitIntegralPhysicsEstimator,
     SplitIntegralPhysicsEstimator,
     VeryRealisticPhysicsEstimator,
     VerySplitIntegralPhysicsEstimator,
@@ -97,6 +98,7 @@ _ESTIMATOR_INSTANCES = [
     SplitIntegralPhysicsEstimator(CFG),
     VerySplitIntegralPhysicsEstimator(CFG),
     QuadIntegralPhysicsEstimator(CFG),
+    RelevantSplitIntegralPhysicsEstimator(CFG),
 ]
 ESTIMATORS = {est.key: (est, WallClockPause()) for est in _ESTIMATOR_INSTANCES}
 
