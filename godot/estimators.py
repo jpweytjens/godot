@@ -3934,6 +3934,192 @@ class DurationBucketedSplitIntegralPhysicsEstimator(
             f"short<{self._short_s:.0f}s, long>{self._long_s:.0f}s)"
         )
 
+
+class DecoupledVFlatDurationBucketedEstimator(
+    DurationBucketedSplitIntegralPhysicsEstimator
+):
+    """Duration-bucketed corrections decoupled from v_flat estimation.
+
+    v_flat is estimated continuously via `PriorFreeVFlat` from ALL
+    samples (including flat). The corrections accumulate ONLY from
+    non-flat samples (g > 0 for climb, g < 0 for descent). This
+    eliminates the feedback loop where corrections and v_flat
+    estimation fight over the same bias.
+
+    Predictions scale by `v_flat_current / v_flat_init` so the ratio
+    table (built at v_flat_init) stays fixed while v_flat floats.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+    flat_threshold : float, optional
+        Gradient (fraction) below which a sample is "flat" and excluded
+        from corrections. Default 0.01 (1%).
+    """
+
+    name = "decoupled_vflat_duration_bucketed_physics"
+    level = 5
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        flat_threshold: float = 0.01,
+        short_s: float = 120.0,
+        long_s: float = 480.0,
+        min_relevant_s: float = 120.0,
+    ) -> None:
+        super().__init__(
+            cfg, short_s=short_s, long_s=long_s, min_relevant_s=min_relevant_s
+        )
+        self._flat_threshold = flat_threshold
+        self._vflat_est = PriorFreeVFlat()
+
+    def _decoupled_integrals(
+        self, ride: Ride
+    ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series, pd.Series]:
+        """4 correction channels (strict g>0 / g<0) + v_flat series."""
+        segments = ride.gradient_segments
+        df = ride.df
+        n = len(df)
+
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.clip(
+            np.floor(gradients.values * 100).astype(int),
+            min(self._ratios),
+            max(self._ratios),
+        )
+        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+        grad_frac = gradients.values
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        valid = (
+            ~paused
+            & (speed > 0.5)
+            & (row_ratios > 0.05)
+            & (dd > 0)
+            & self._extra_row_mask(ride)
+        )
+
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        dd_per_ratio = dd / safe_ratios
+
+        seg_durations = _climb_duration_per_segment(
+            segments, self._v_flat_ms, self._ratios
+        )
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = df["distance_m"].values
+        seg_idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+        row_climb_dur = seg_durations[seg_idx]
+
+        # STRICT: flat excluded from both climb and descent corrections
+        is_climb = grad_frac > self._flat_threshold
+        is_descent = grad_frac < -self._flat_threshold
+        is_short = is_climb & (row_climb_dur > 0) & (row_climb_dur < self._short_s)
+        is_medium = (
+            is_climb & (row_climb_dur >= self._short_s) & (row_climb_dur < self._long_s)
+        )
+        is_long = is_climb & (row_climb_dur >= self._long_s)
+
+        channels = {}
+        for label, mask in [
+            ("short", is_short),
+            ("medium", is_medium),
+            ("long", is_long),
+            ("descent", is_descent),
+        ]:
+            S = np.cumsum(np.where(valid & mask, dd_per_ratio, 0.0))
+            T = np.cumsum(np.where(valid & mask, dt, 0.0))
+            safe_T = np.where(T > 0, T, 1.0)
+            c = np.where(T > 0, S / (self._v_flat_ms * safe_T), 1.0)
+            channels[label] = pd.Series(c, index=df.index)
+
+        # v_flat from PriorFreeVFlat (all samples, including flat)
+        v_flat_series = self._vflat_est.estimate(ride, self._ratios, self._v_flat_ms)
+
+        return (
+            channels["short"],
+            channels["medium"],
+            channels["long"],
+            channels["descent"],
+            v_flat_series,
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        c_short, c_medium, c_long, c_descent, v_flat_dyn = self._decoupled_integrals(
+            ride
+        )
+
+        # v_flat scaling: ratio table built at v_flat_init, scale by current
+        v_scale = v_flat_dyn.values / self._v_flat_ms
+        v_scale = np.where((v_scale > 0.5) & (v_scale < 2.0), v_scale, 1.0)
+
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        base_speeds = self._v_flat_ms * seg_ratios  # at init operating point
+
+        seg_durations = _climb_duration_per_segment(
+            segments, self._v_flat_ms, self._ratios
+        )
+        is_climb = np.array([s.gradient > self._flat_threshold for s in segments])
+        is_descent = np.array([s.gradient < -self._flat_threshold for s in segments])
+        is_flat = ~is_climb & ~is_descent
+        is_short_seg = is_climb & (seg_durations > 0) & (seg_durations < self._short_s)
+        is_medium_seg = (
+            is_climb & (seg_durations >= self._short_s) & (seg_durations < self._long_s)
+        )
+        is_long_seg = is_climb & (seg_durations >= self._long_s)
+
+        ttg = np.zeros(len(df))
+        # Climb/descent segments: corrections applied, v_flat scaled
+        for mask, corr in [
+            (is_short_seg, c_short),
+            (is_medium_seg, c_medium),
+            (is_long_seg, c_long),
+            (is_descent, c_descent),
+        ]:
+            if not mask.any():
+                continue
+            masked_speeds = np.where(mask, base_speeds, np.inf)
+            bucket_ttg = segment_ttg_from_row(
+                distances, total_dist, segments, masked_speeds
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ttg += bucket_ttg / (corr.values * v_scale)
+
+        # Flat segments: v_flat_current directly, no corrections
+        if is_flat.any():
+            flat_speeds = np.where(is_flat, base_speeds, np.inf)
+            flat_ttg = segment_ttg_from_row(
+                distances, total_dist, segments, flat_speeds
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ttg += flat_ttg / v_scale
+
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"decoupled-vflat duration-bucketed physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h init)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"DecoupledVFlatDurationBucketedEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r})"
+        )
+
     def __repr__(self) -> str:
         return (
             f"DurationBucketedSplitIntegralPhysicsEstimator("
