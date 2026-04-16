@@ -1,5 +1,6 @@
 """FIT file parsing — mirrors the output of `read_gpx`."""
 
+import gzip
 from functools import lru_cache
 from pathlib import Path
 
@@ -33,7 +34,11 @@ def read_fit(path: Path) -> pd.DataFrame:
         Additional fields (hr, cad, watts, atemp) included if present.
         Matches the schema of `read_gpx` — pipe functions work unchanged.
     """
-    stream = Stream.from_file(str(path))
+    if path.suffixes[-1:] == [".gz"] or str(path).endswith(".fit.gz"):
+        with gzip.open(path, "rb") as f:
+            stream = Stream.from_byte_array(f.read())
+    else:
+        stream = Stream.from_file(str(path))
     decoder = Decoder(stream)
     messages, errors = decoder.read(
         apply_scale_and_offset=True,

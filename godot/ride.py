@@ -200,10 +200,18 @@ def load_ride(
     if distance_method not in _DISTANCE_PIPES:
         raise ValueError(f"distance_method must be one of {list(_DISTANCE_PIPES)}")
 
-    suffix = path.suffix.lower()
-    parser = _PARSERS.get(suffix)
+    name_lower = path.name.lower()
+    if name_lower.endswith(".fit.gz") or name_lower.endswith(".fit"):
+        parser = read_fit
+    elif name_lower.endswith(".gpx"):
+        parser = read_gpx
+    else:
+        suffix = path.suffix.lower()
+        parser = _PARSERS.get(suffix)
     if parser is None:
-        raise ValueError(f"Unsupported file type {suffix!r}, expected .gpx or .fit")
+        raise ValueError(
+            f"Unsupported file type {path.suffix!r}, expected .gpx, .fit or .fit.gz"
+        )
 
     df = parser(path).pipe(_DISTANCE_PIPES[distance_method]).pipe(fill_pauses)
 
