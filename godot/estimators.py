@@ -145,7 +145,10 @@ class AvgSpeedEstimator(BaseEstimator):
         cum_dd = dd.cumsum()
         cum_dt = dt.cumsum()
         raw = self.safe_divide(cum_dd, cum_dt)
-        return raw.where(cum_dt >= self._min_periods)
+        # After min_periods: use the stable expanding average.
+        # Before min_periods: fall back to the raw (noisy) average
+        # so very short rides don't produce all-NaN predictions.
+        return raw.where(cum_dt >= self._min_periods, other=raw.where(cum_dt > 0))
 
 
 class RollingAvgSpeedEstimator(BaseEstimator):
