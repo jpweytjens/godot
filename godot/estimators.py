@@ -2414,6 +2414,155 @@ def empirical_power_ratios(
     return ratios
 
 
+def duration_aware_segment_speeds(
+    segments: list,
+    v_flat_ms: float,
+    mass_kg: float,
+    cda: float = 0.35,
+    crr: float = 0.005,
+    rho: float = 1.225,
+    headwind_ms: float = 2.22,
+    w_prime_cp: float = 60.0,
+    descent_confidence: float = 0.55,
+) -> np.ndarray:
+    """Per-segment speeds using CP-model duration-dependent climb effort.
+
+    Groups consecutive positive-gradient VW segments into climbs,
+    predicts each climb's total duration at the prior `v_flat`, then
+    uses the CP model to set the effective climb effort for each
+    segment within that climb:
+
+        π_can(T) = 1 + W'/CP / T
+
+    where `T` is the predicted climb duration and `W'/CP` (seconds)
+    controls the power-duration shape. Short climbs get high effort
+    (rider can exceed steady-state); long climbs get low effort
+    (rider must pace).
+
+    For descents, applies a fixed `descent_confidence` scaling.
+
+    Parameters
+    ----------
+    segments : list of RouteSegment
+        VW-simplified route segments.
+    v_flat_ms : float
+        Prior flat-ground speed (m/s).
+    mass_kg : float
+        Rider + bike mass (kg).
+    w_prime_cp : float, optional
+        W'/CP ratio in seconds. Default 60 (typical amateur).
+        Higher = more anaerobic capacity = faster on short climbs.
+    descent_confidence : float, optional
+        Descent speed scaling. Default 0.55.
+
+    Returns
+    -------
+    np.ndarray
+        Speed in m/s per segment, shape (S,).
+    """
+    g_const = 9.81
+    k_a = 0.5 * rho * cda
+
+    # Back-solve P_flat from v_flat + headwind
+    p_flat = (
+        k_a * (v_flat_ms + headwind_ms) ** 2 * v_flat_ms
+        + crr * mass_kg * g_const * v_flat_ms
+    )
+
+    # --- Group segments into climbs and predict durations ---
+    n_seg = len(segments)
+    # For each segment, compute base ratio at constant power (for duration estimate)
+    base_ratios = np.array(
+        [
+            physics_gradient_ratios(
+                mass_kg,
+                v_flat_ms,
+                cda,
+                crr,
+                rho,
+                grad_min_pct=int(math.floor(s.gradient * 100)),
+                grad_max_pct=int(math.floor(s.gradient * 100)),
+            ).get(int(math.floor(s.gradient * 100)), 1.0)
+            for s in segments
+        ]
+    )
+    seg_lengths = np.array([s.end_distance_m - s.start_distance_m for s in segments])
+    seg_grads = np.array([s.gradient for s in segments])
+
+    # Group consecutive positive-gradient segments into climbs
+    climb_duration = np.zeros(n_seg)  # predicted duration of containing climb
+    i = 0
+    while i < n_seg:
+        if seg_grads[i] > 0:
+            # Start of a climb: find the end
+            j = i
+            total_time = 0.0
+            while j < n_seg and seg_grads[j] > 0:
+                speed_j = max(0.5, v_flat_ms * base_ratios[j])
+                total_time += seg_lengths[j] / speed_j
+                j += 1
+            # Assign climb duration to all segments in this climb
+            climb_duration[i:j] = total_time
+            i = j
+        else:
+            i += 1
+
+    # --- Compute per-segment speed using CP-aware effort ---
+    speeds = np.empty(n_seg)
+    for i, s in enumerate(segments):
+        theta = math.atan(s.gradient)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+        if s.gradient > 0 and climb_duration[i] > 0:
+            # Climb: CP-model effort
+            T = climb_duration[i]
+            pi_can = 1.0 + w_prime_cp / T
+            # Power needed for constant speed
+            p_const = (
+                k_a * (v_flat_ms + headwind_ms) ** 2
+                + crr * mass_kg * g_const * cos_t
+                + mass_kg * g_const * sin_t
+            ) * v_flat_ms
+            # Interpolate: can push toward constant speed by pi_can fraction
+            effort_frac = min(1.0, (pi_can - 1.0) / max(0.01, (p_const / p_flat) - 1.0))
+            p_g = p_flat + effort_frac * (p_const - p_flat)
+        elif s.gradient < 0:
+            # Descent: reduce power
+            p_grav = mass_kg * g_const * abs(sin_t) * v_flat_ms
+            p_g = max(0.0, p_flat - (1 - descent_confidence) * p_grav)
+        else:
+            p_g = p_flat
+
+        # Solve cubic for v
+        c3 = k_a
+        c2 = 2 * k_a * headwind_ms
+        c1 = k_a * headwind_ms**2 + mass_kg * g_const * (crr * cos_t + sin_t)
+        c0 = -p_g
+
+        if p_g <= 0 and c1 < 0:
+            disc = c2**2 - 4 * c3 * c1
+            v = (-c2 + math.sqrt(disc)) / (2 * c3) if disc >= 0 else 0.5
+        elif p_g <= 0:
+            v = 0.5
+        else:
+            roots = np.roots([c3, c2, c1, c0])
+            real_pos = [r.real for r in roots if abs(r.imag) < 1e-10 and r.real > 0]
+            v = max(real_pos) if real_pos else 0.5
+
+        # Freewheel cap on descents
+        if s.gradient < 0:
+            v_freewheel = math.sqrt(
+                max(0, 2 * mass_kg * g_const * abs(sin_t) / (rho * cda))
+            )
+            if v_freewheel > v_flat_ms:
+                v_cap = v_flat_ms + descent_confidence * (v_freewheel - v_flat_ms)
+                v = min(v, v_cap)
+
+        speeds[i] = v
+
+    return speeds
+
+
 class PhysicsGradientPriorEstimator(GradientPriorEstimator):
     """Gradient-aware ETA estimator with ratios from a constant-power model.
 
@@ -3359,6 +3508,689 @@ class RouteAdaptiveSplitIntegralPhysicsEstimator(
             f"RouteAdaptiveSplitIntegralPhysicsEstimator("
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"category_params={self._category_params!r})"
+        )
+
+
+def _climb_duration_per_segment(
+    segments: list, v_flat_ms: float, ratios: dict[int, float]
+) -> np.ndarray:
+    """Predicted duration of the containing climb for each VW segment.
+
+    Groups consecutive positive-gradient segments into climbs, predicts
+    each climb's total time at `v_flat * r(g)`, and broadcasts back to
+    every segment in that climb.  Descent/flat segments get 0.
+    """
+    n = len(segments)
+    durations = np.zeros(n)
+    min_bin, max_bin = min(ratios), max(ratios)
+    i = 0
+    while i < n:
+        if segments[i].gradient > 0:
+            j = i
+            total_time = 0.0
+            while j < n and segments[j].gradient > 0:
+                g_pct = max(
+                    min_bin, min(max_bin, int(math.floor(segments[j].gradient * 100)))
+                )
+                r = ratios.get(g_pct, 1.0)
+                length = segments[j].end_distance_m - segments[j].start_distance_m
+                total_time += length / max(0.5, v_flat_ms * r)
+                j += 1
+            durations[i:j] = total_time
+            i = j
+        else:
+            i += 1
+    return durations
+
+
+class DurationBucketedSplitIntegralPhysicsEstimator(
+    ProfileConditionalSplitIntegralPhysicsEstimator
+):
+    """Split-integral with duration-bucketed climb corrections.
+
+    Instead of one `c_up` for all climbs, maintains three corrections
+    indexed by the predicted duration of each climb:
+
+    - `c_short` for climbs < `short_s` (anaerobic, punchy walls)
+    - `c_medium` for climbs between `short_s` and `long_s` (VO2max)
+    - `c_long` for climbs >= `long_s` (threshold, sustained)
+
+    Each upcoming climb segment in the TTG walk is corrected by the
+    bucket matching its own containing climb's predicted duration.
+    On a Belgian hill ride, every berg is short and `c_short` learns
+    the punchy-wall bias. On a mountain ride, the pass is long and
+    `c_long` learns the pacing bias. No contamination between
+    duration regimes.
+
+    Inherits profile-conditional relevance filtering (mountains only).
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    short_s : float, optional
+        Cutoff between short and medium climbs. Default 120 (2 min).
+    long_s : float, optional
+        Cutoff between medium and long climbs. Default 480 (8 min).
+    min_relevant_s : float, optional
+        Relevance threshold for mountain routes. Default 120 s.
+    """
+
+    name = "duration_bucketed_split_integral_physics"
+    level = 5
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        short_s: float = 120.0,
+        long_s: float = 480.0,
+        min_relevant_s: float = 120.0,
+    ) -> None:
+        super().__init__(cfg, min_relevant_s=min_relevant_s)
+        self._short_s = short_s
+        self._long_s = long_s
+
+    def _duration_bucketed_integrals(
+        self, ride: Ride
+    ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+        """Four-channel integrals: c_short, c_medium, c_long, c_descent."""
+        segments = ride.gradient_segments
+        df = ride.df
+        n = len(df)
+
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.clip(
+            np.floor(gradients.values * 100).astype(int),
+            min(self._ratios),
+            max(self._ratios),
+        )
+        row_ratios = np.array([self._ratios.get(g, 1.0) for g in grad_pct])
+        grad_frac = gradients.values
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        valid = (
+            ~paused
+            & (speed > 0.5)
+            & (row_ratios > 0.05)
+            & (dd > 0)
+            & self._extra_row_mask(ride)
+        )
+
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        dd_per_ratio = dd / safe_ratios
+
+        # Map each row to its segment's climb duration
+        seg_durations = _climb_duration_per_segment(
+            segments, self._v_flat_ms, self._ratios
+        )
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = df["distance_m"].values
+        seg_idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+        row_climb_dur = seg_durations[seg_idx]
+
+        is_climb = grad_frac >= 0
+        is_short = is_climb & (row_climb_dur > 0) & (row_climb_dur < self._short_s)
+        is_medium = (
+            is_climb & (row_climb_dur >= self._short_s) & (row_climb_dur < self._long_s)
+        )
+        is_long = is_climb & (row_climb_dur >= self._long_s)
+        is_descent = ~is_climb
+
+        channels = {}
+        for label, mask in [
+            ("short", is_short),
+            ("medium", is_medium),
+            ("long", is_long),
+            ("descent", is_descent),
+        ]:
+            S = np.cumsum(np.where(valid & mask, dd_per_ratio, 0.0))
+            T = np.cumsum(np.where(valid & mask, dt, 0.0))
+            safe_T = np.where(T > 0, T, 1.0)
+            c = np.where(T > 0, S / (self._v_flat_ms * safe_T), 1.0)
+            channels[label] = pd.Series(c, index=df.index)
+
+        return (
+            channels["short"],
+            channels["medium"],
+            channels["long"],
+            channels["descent"],
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        c_short, c_medium, c_long, c_descent = self._duration_bucketed_integrals(ride)
+
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        base_speeds = self._v_flat_ms * seg_ratios
+
+        seg_durations = _climb_duration_per_segment(
+            segments, self._v_flat_ms, self._ratios
+        )
+        is_climb = np.array([s.gradient >= 0 for s in segments])
+        is_short_seg = is_climb & (seg_durations > 0) & (seg_durations < self._short_s)
+        is_medium_seg = (
+            is_climb & (seg_durations >= self._short_s) & (seg_durations < self._long_s)
+        )
+        is_long_seg = is_climb & (seg_durations >= self._long_s)
+        is_descent_seg = ~is_climb
+
+        # Compute TTG per duration bucket
+        ttg = np.zeros(len(df))
+        for mask, corr in [
+            (is_short_seg, c_short),
+            (is_medium_seg, c_medium),
+            (is_long_seg, c_long),
+            (is_descent_seg, c_descent),
+        ]:
+            if not mask.any():
+                continue
+            masked_speeds = np.where(mask, base_speeds, np.inf)
+            bucket_ttg = segment_ttg_from_row(
+                distances, total_dist, segments, masked_speeds
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ttg += bucket_ttg / corr.values
+
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+
+        c_short, c_medium, c_long, c_descent = self._duration_bucketed_integrals(ride)
+
+        seg_durations = _climb_duration_per_segment(
+            segments, self._v_flat_ms, self._ratios
+        )
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = df["distance_m"].values
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        # Pick the right correction for each row's duration bucket
+        row_dur = seg_durations[idx]
+        is_climb = np.array([segments[idx[i]].gradient >= 0 for i in range(len(df))])
+        corr = np.where(
+            ~is_climb,
+            c_descent.values,
+            np.where(
+                row_dur < self._short_s,
+                c_short.values,
+                np.where(row_dur < self._long_s, c_medium.values, c_long.values),
+            ),
+        )
+        speed = (
+            np.array(
+                [
+                    self._v_flat_ms * self._ratio_for(segments[idx[i]].gradient)
+                    for i in range(len(df))
+                ]
+            )
+            * corr
+        )
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"duration-bucketed split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
+            f"short<{self._short_s:.0f}s, long>{self._long_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"DurationBucketedSplitIntegralPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"short_s={self._short_s!r}, long_s={self._long_s!r})"
+        )
+
+
+def _cp_segment_speeds(
+    segments: list,
+    v_flat_ms: float,
+    mass_kg: float,
+    ratios: dict[int, float],
+    w_prime_cp: float = 60.0,
+    intensity: float = 0.7,
+    descent_confidence: float = 0.55,
+    cda: float = 0.35,
+    crr: float = 0.005,
+    rho: float = 1.225,
+    headwind_ms: float = 2.22,
+) -> np.ndarray:
+    """Per-segment speeds using direct CP-model power scaling.
+
+    For each climb segment in a climb of predicted duration T:
+
+        P(T) = P_flat × (1 + W'/CP / T)
+
+    capped at the power needed for constant speed. The CP model sets
+    the absolute power directly — no interpolation via α. Short climbs
+    get high power (anaerobic capacity); long climbs get near-flat
+    power (threshold pacing).
+
+    Descents use the standard confidence-based model.
+    """
+    g_const = 9.81
+    k_a = 0.5 * rho * cda
+    p_flat = (
+        k_a * (v_flat_ms + headwind_ms) ** 2 * v_flat_ms
+        + crr * mass_kg * g_const * v_flat_ms
+    )
+
+    seg_durations = _climb_duration_per_segment(segments, v_flat_ms, ratios)
+    n_seg = len(segments)
+    speeds = np.empty(n_seg)
+
+    for i, s in enumerate(segments):
+        theta = math.atan(s.gradient)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+        if s.gradient > 0 and seg_durations[i] > 0:
+            T = seg_durations[i]
+            pi_can = 1.0 + intensity * w_prime_cp / max(T, 1.0)
+            p_g = p_flat * pi_can
+            # Cap at power needed for constant speed
+            p_const = (
+                k_a * (v_flat_ms + headwind_ms) ** 2
+                + crr * mass_kg * g_const * cos_t
+                + mass_kg * g_const * sin_t
+            ) * v_flat_ms
+            p_g = min(p_g, p_const)
+        elif s.gradient < 0:
+            p_grav = mass_kg * g_const * abs(sin_t) * v_flat_ms
+            p_g = max(0.0, p_flat - (1 - descent_confidence) * p_grav)
+        else:
+            p_g = p_flat
+
+        c3, c2 = k_a, 2 * k_a * headwind_ms
+        c1 = k_a * headwind_ms**2 + mass_kg * g_const * (crr * cos_t + sin_t)
+        c0 = -p_g
+
+        if p_g <= 0 and c1 < 0:
+            disc = c2**2 - 4 * c3 * c1
+            v = (-c2 + math.sqrt(disc)) / (2 * c3) if disc >= 0 else 0.5
+        elif p_g <= 0:
+            v = 0.5
+        else:
+            roots = np.roots([c3, c2, c1, c0])
+            real_pos = [r.real for r in roots if abs(r.imag) < 1e-10 and r.real > 0]
+            v = max(real_pos) if real_pos else 0.5
+
+        if s.gradient < 0:
+            v_fw = math.sqrt(max(0, 2 * mass_kg * g_const * abs(sin_t) / (rho * cda)))
+            if v_fw > v_flat_ms:
+                v = min(v, v_flat_ms + descent_confidence * (v_fw - v_flat_ms))
+
+        speeds[i] = v
+    return speeds
+
+
+class CPDurationBucketedEstimator(DurationBucketedSplitIntegralPhysicsEstimator):
+    """Duration-bucketed corrections on top of CP-aware physics.
+
+    Combines two ideas:
+
+    1. **CP-model per-segment speeds** — each climb's predicted
+       duration sets the rider's power via P(T) = P_flat × (1 + W'/CP / T).
+       Short climbs get high effort, long climbs pace near flat power.
+       The physics model starts close to reality at every duration tier.
+
+    2. **Duration-bucketed corrections** — three climb channels
+       (short/medium/long) each learn the residual bias between the
+       CP-aware prediction and reality. Because the physics is already
+       duration-aware, the corrections are small and converge fast.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+    w_prime_cp : float, optional
+        W'/CP in seconds. Default 60 (typical amateur).
+    descent_confidence : float, optional
+        Descent behavior. Default 0.55.
+    short_s, long_s : float, optional
+        Duration bucket boundaries. Default 120 s / 480 s.
+    min_relevant_s : float, optional
+        Relevance threshold for mountain routes. Default 120 s.
+    """
+
+    name = "cp_duration_bucketed_split_integral_physics"
+    level = 5
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        w_prime_cp: float = 60.0,
+        intensity: float = 0.7,
+        descent_confidence: float = 0.55,
+        short_s: float = 120.0,
+        long_s: float = 480.0,
+        min_relevant_s: float = 120.0,
+    ) -> None:
+        super().__init__(
+            cfg, short_s=short_s, long_s=long_s, min_relevant_s=min_relevant_s
+        )
+        self._w_prime_cp = w_prime_cp
+        self._intensity = intensity
+        self._descent_conf = descent_confidence
+
+    def _cp_speeds(self, ride: Ride) -> np.ndarray:
+        return _cp_segment_speeds(
+            ride.gradient_segments,
+            self._v_flat_ms,
+            self._mass_kg,
+            self._ratios,
+            w_prime_cp=self._w_prime_cp,
+            intensity=self._intensity,
+            descent_confidence=self._descent_conf,
+            cda=self._cfg.cda,
+            crr=self._cfg.crr,
+            rho=self._cfg.rho,
+            headwind_ms=self._cfg.headwind_ms,
+        )
+
+    def _duration_bucketed_integrals(
+        self, ride: Ride
+    ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+        """Integrals using CP-aware per-segment ratios."""
+        segments = ride.gradient_segments
+        df = ride.df
+        n = len(df)
+
+        cp_speeds = self._cp_speeds(ride)
+        seg_ratios = cp_speeds / self._v_flat_ms
+
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = df["distance_m"].values
+        seg_idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+        row_ratios = seg_ratios[seg_idx]
+
+        gradients, _ = _row_gradients(ride)
+        grad_frac = gradients.values
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        valid = (
+            ~paused
+            & (speed > 0.5)
+            & (row_ratios > 0.05)
+            & (dd > 0)
+            & self._extra_row_mask(ride)
+        )
+
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        dd_per_ratio = dd / safe_ratios
+
+        seg_durations = _climb_duration_per_segment(
+            segments, self._v_flat_ms, self._ratios
+        )
+        row_climb_dur = seg_durations[seg_idx]
+
+        is_climb = grad_frac >= 0
+        is_short = is_climb & (row_climb_dur > 0) & (row_climb_dur < self._short_s)
+        is_medium = (
+            is_climb & (row_climb_dur >= self._short_s) & (row_climb_dur < self._long_s)
+        )
+        is_long = is_climb & (row_climb_dur >= self._long_s)
+        is_descent = ~is_climb
+
+        channels = {}
+        for label, mask in [
+            ("short", is_short),
+            ("medium", is_medium),
+            ("long", is_long),
+            ("descent", is_descent),
+        ]:
+            S = np.cumsum(np.where(valid & mask, dd_per_ratio, 0.0))
+            T = np.cumsum(np.where(valid & mask, dt, 0.0))
+            safe_T = np.where(T > 0, T, 1.0)
+            c = np.where(T > 0, S / (self._v_flat_ms * safe_T), 1.0)
+            channels[label] = pd.Series(c, index=df.index)
+
+        return (
+            channels["short"],
+            channels["medium"],
+            channels["long"],
+            channels["descent"],
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        c_short, c_medium, c_long, c_descent = self._duration_bucketed_integrals(ride)
+
+        cp_speeds = self._cp_speeds(ride)
+        seg_durations = _climb_duration_per_segment(
+            segments, self._v_flat_ms, self._ratios
+        )
+        is_climb = np.array([s.gradient >= 0 for s in segments])
+        is_short_seg = is_climb & (seg_durations > 0) & (seg_durations < self._short_s)
+        is_medium_seg = (
+            is_climb & (seg_durations >= self._short_s) & (seg_durations < self._long_s)
+        )
+        is_long_seg = is_climb & (seg_durations >= self._long_s)
+        is_descent_seg = ~is_climb
+
+        ttg = np.zeros(len(df))
+        for mask, corr in [
+            (is_short_seg, c_short),
+            (is_medium_seg, c_medium),
+            (is_long_seg, c_long),
+            (is_descent_seg, c_descent),
+        ]:
+            if not mask.any():
+                continue
+            masked_speeds = np.where(mask, cp_speeds, np.inf)
+            bucket_ttg = segment_ttg_from_row(
+                distances, total_dist, segments, masked_speeds
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ttg += bucket_ttg / corr.values
+
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"CP duration-bucketed physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
+            f"W'/CP={self._w_prime_cp:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CPDurationBucketedEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"w_prime_cp={self._w_prime_cp!r})"
+        )
+
+
+class DurationAwareSplitIntegralPhysicsEstimator(
+    ProfileConditionalSplitIntegralPhysicsEstimator
+):
+    """Split-integral estimator with CP-model duration-dependent climb effort.
+
+    Replaces the fixed `climb_effort` (α) with a power-duration model:
+    each VW climb's predicted duration determines how hard the rider can
+    push, using the critical-power relationship
+
+        π_can(T) = 1 + W'/CP / T
+
+    Short climbs (T < ~2 min) get high effort (rider can exceed CP by
+    drawing on W'). Long climbs (T > ~5 min) get low effort (rider must
+    pace at or near CP). The single parameter `W'/CP` (seconds) replaces
+    `climb_effort` and encodes the rider's anaerobic capacity relative to
+    their threshold --- the power-duration curve shape.
+
+    Inherits profile-conditional relevance filtering (mountains only).
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    w_prime_cp : float, optional
+        W'/CP ratio in seconds. Default 60 (typical amateur).
+    descent_confidence : float, optional
+        Override for descent behavior. Default 0.55.
+    min_relevant_s : float, optional
+        Relevance threshold for mountain routes. Default 120 s.
+    """
+
+    name = "duration_aware_split_integral_physics"
+    level = 5
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        w_prime_cp: float = 60.0,
+        descent_confidence: float = 0.55,
+        min_relevant_s: float = 120.0,
+    ) -> None:
+        super().__init__(cfg, min_relevant_s=min_relevant_s)
+        self._w_prime_cp = w_prime_cp
+        self._descent_conf = descent_confidence
+
+    def _seg_speeds(self, ride: Ride) -> np.ndarray:
+        return duration_aware_segment_speeds(
+            ride.gradient_segments,
+            self._v_flat_ms,
+            self._mass_kg,
+            cda=self._cfg.cda,
+            crr=self._cfg.crr,
+            rho=self._cfg.rho,
+            headwind_ms=self._cfg.headwind_ms,
+            w_prime_cp=self._w_prime_cp,
+            intensity=self._intensity,
+            descent_confidence=self._descent_conf,
+        )
+
+    def _duration_aware_integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        """Integrals using per-segment duration-aware ratios."""
+        segments = ride.gradient_segments
+        df = ride.df
+        n = len(df)
+
+        seg_speeds = self._seg_speeds(ride)
+        seg_ratios = seg_speeds / self._v_flat_ms
+
+        # Map per-row: find each row's segment and use its ratio
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = df["distance_m"].values
+        seg_idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+        row_ratios = seg_ratios[seg_idx]
+
+        gradients, _ = _row_gradients(ride)
+        grad_frac = gradients.values
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        valid = (
+            ~paused
+            & (speed > 0.5)
+            & (row_ratios > 0.05)
+            & (dd > 0)
+            & self._extra_row_mask(ride)
+        )
+        is_climb = grad_frac >= 0
+
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        dd_per_ratio = dd / safe_ratios
+
+        S_climb = np.cumsum(np.where(valid & is_climb, dd_per_ratio, 0.0))
+        T_climb = np.cumsum(np.where(valid & is_climb, dt, 0.0))
+        S_descent = np.cumsum(np.where(valid & ~is_climb, dd_per_ratio, 0.0))
+        T_descent = np.cumsum(np.where(valid & ~is_climb, dt, 0.0))
+
+        safe_Tc = np.where(T_climb > 0, T_climb, 1.0)
+        safe_Td = np.where(T_descent > 0, T_descent, 1.0)
+        climb_out = np.where(T_climb > 0, S_climb / (self._v_flat_ms * safe_Tc), 1.0)
+        descent_out = np.where(
+            T_descent > 0, S_descent / (self._v_flat_ms * safe_Td), 1.0
+        )
+        return (
+            pd.Series(climb_out, index=df.index),
+            pd.Series(descent_out, index=df.index),
+        )
+
+    def predict(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        climb_arr, descent_arr = (
+            s.values for s in self._duration_aware_integrals(ride)
+        )
+
+        seg_speeds = self._seg_speeds(ride)
+        is_climb = np.array([s.gradient >= 0 for s in segments])
+        climb_speeds = np.where(is_climb, seg_speeds, np.inf)
+        descent_speeds = np.where(is_climb, np.inf, seg_speeds)
+
+        climb_ttg = segment_ttg_from_row(distances, total_dist, segments, climb_speeds)
+        descent_ttg = segment_ttg_from_row(
+            distances, total_dist, segments, descent_speeds
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ttg = climb_ttg / climb_arr + descent_ttg / descent_arr
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        seg_speeds = self._seg_speeds(ride)
+        seg_ratios = seg_speeds / self._v_flat_ms
+
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = df["distance_m"].values
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+
+        climb_int, descent_int = self._duration_aware_integrals(ride)
+        is_climb_row = np.array(
+            [segments[idx[i]].gradient >= 0 for i in range(len(df))]
+        )
+        integral_at_row = np.where(is_climb_row, climb_int.values, descent_int.values)
+        speed = self._v_flat_ms * seg_ratios[idx] * integral_at_row
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"duration-aware split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
+            f"W'/CP={self._w_prime_cp:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"DurationAwareSplitIntegralPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"w_prime_cp={self._w_prime_cp!r})"
         )
 
 
