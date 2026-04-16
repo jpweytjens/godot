@@ -1410,6 +1410,191 @@ class RelevantPriorFreeVFlat(PriorFreeVFlat):
         )
 
 
+class RoutePredictedVFlat(VFlatEstimator):
+    """Route-aware v_flat prior using the gradient distribution.
+
+    Instead of using the raw `v_flat_init` as the prior, computes the
+    expected average speed for the specific route by walking the VW
+    segments with the ratio table:
+
+        v_predicted = total_distance / Σ(length_j / (v_flat_init × r(g_j)))
+
+    On a flat route this equals `v_flat_init`. On a mountain route it's
+    lower because the climbs drag down the average. This route-adjusted
+    prior feeds into a PriorFreeVFlat-style expanding mean, so the
+    estimator starts from a route-appropriate speed and refines online.
+
+    Parameters
+    ----------
+    skip_fraction, min_skip_s, max_skip_s :
+        Inherited from `PriorFreeVFlat`.
+    """
+
+    tag = "route_predicted"
+
+    def __init__(
+        self,
+        skip_fraction: float = 0.01,
+        min_skip_s: float = 20.0,
+        max_skip_s: float = 300.0,
+    ) -> None:
+        self._skip_fraction = skip_fraction
+        self._min_skip_s = min_skip_s
+        self._max_skip_s = max_skip_s
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+
+        # Route-predicted v_flat: expected average speed for this route
+        est_time = _estimate_ride_time_s(segments, ratios, v_flat_init_ms)
+        v_predicted = total_dist / max(est_time, 1.0)
+
+        # PriorFreeVFlat-style expanding mean, starting from v_predicted
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.floor(gradients.values * 100).astype(int)
+        min_bin, max_bin = min(ratios), max(ratios)
+        grad_pct = np.clip(grad_pct, min_bin, max_bin)
+        row_ratios = np.array([ratios.get(g, 1.0) for g in grad_pct])
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+
+        est_total = _estimate_ride_time_s(segments, ratios, v_flat_init_ms)
+        skip_s = max(
+            self._min_skip_s,
+            min(self._max_skip_s, self._skip_fraction * est_total),
+        )
+
+        valid_row = ~paused & (speed > 0.5) & (row_ratios > 0.05)
+        elapsed_moving = np.cumsum(np.where(valid_row, dt, 0.0))
+        contrib_mask = valid_row & (elapsed_moving > skip_s)
+
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        contribution = np.where(contrib_mask, speed / safe_ratios, 0.0)
+        cum_sum = np.cumsum(contribution)
+        count = np.cumsum(contrib_mask.astype(np.int64))
+        safe_count = np.where(count > 0, count, 1)
+        v_flat = np.where(count > 0, cum_sum / safe_count, v_predicted)
+        return pd.Series(v_flat, index=df.index)
+
+    def __str__(self) -> str:
+        return "route-predicted v_flat"
+
+    def __repr__(self) -> str:
+        return "RoutePredictedVFlat()"
+
+
+class KalmanVFlat(VFlatEstimator):
+    """Kalman-filter v_flat estimator with gradient-dependent noise.
+
+    Models v_flat as a slowly-drifting state observed through noisy
+    back-derivation `z = v_obs / r(g)`. The measurement noise scales
+    with gradient steepness:
+
+        R(g) = σ²_base + σ²_grad / cos²(θ)
+
+    so flat observations (low noise) dominate the estimate while steep
+    observations (high noise from ratio-table uncertainty) are
+    discounted. The prior `v_flat_init` enters as the initial state
+    with configurable uncertainty.
+
+    Process noise Q models within-ride v_flat drift (fatigue, wind
+    changes). A typical value of Q ≈ 0.0001 m²/s⁴ allows ~1 km/h of
+    drift per hour.
+
+    Parameters
+    ----------
+    sigma_base : float, optional
+        Baseline measurement noise (m/s)². Default 1.0.
+    sigma_grad : float, optional
+        Gradient-dependent noise scaling (m/s)². Default 4.0.
+    q : float, optional
+        Process noise (m/s)² per second. Default 0.0001.
+    p_init : float, optional
+        Initial state uncertainty (m/s)². Default 4.0 (~2 m/s = 7 km/h
+        uncertainty). Set lower if the prior is trusted (cross-ride).
+    min_speed : float, optional
+        Minimum speed for a valid observation. Default 0.5 m/s.
+    """
+
+    tag = "kalman"
+
+    def __init__(
+        self,
+        sigma_base: float = 1.0,
+        sigma_grad: float = 4.0,
+        q: float = 0.0001,
+        p_init: float = 4.0,
+        min_speed: float = 0.5,
+    ) -> None:
+        self._sigma_base = sigma_base
+        self._sigma_grad = sigma_grad
+        self._q = q
+        self._p_init = p_init
+        self._min_speed = min_speed
+
+    def estimate(
+        self,
+        ride: Ride,
+        ratios: dict[int, float],
+        v_flat_init_ms: float,
+    ) -> pd.Series:
+        df = ride.df
+        n = len(df)
+        gradients, _ = _row_gradients(ride)
+        grad_frac = gradients.values
+        min_bin, max_bin = min(ratios), max(ratios)
+        grad_pct = np.clip(np.floor(grad_frac * 100).astype(int), min_bin, max_bin)
+        row_ratios = np.array([ratios.get(g, 1.0) for g in grad_pct])
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+
+        v_hat = v_flat_init_ms
+        P = self._p_init
+        out = np.empty(n)
+
+        for i in range(n):
+            # Predict step: v_flat drifts slowly
+            P = P + self._q * dt[i]
+
+            # Update step: if valid observation
+            if not paused[i] and speed[i] > self._min_speed and row_ratios[i] > 0.05:
+                z = speed[i] / row_ratios[i]  # back-derived v_flat
+                cos_t = math.cos(math.atan(grad_frac[i]))
+                R = self._sigma_base + self._sigma_grad / max(cos_t**2, 0.01)
+                K = P / (P + R)
+                v_hat = v_hat + K * (z - v_hat)
+                P = (1 - K) * P
+
+            out[i] = v_hat
+
+        return pd.Series(out, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"kalman(σ_base={self._sigma_base:.1f}, "
+            f"σ_grad={self._sigma_grad:.1f}, "
+            f"P₀={self._p_init:.1f})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"KalmanVFlat(sigma_base={self._sigma_base!r}, "
+            f"sigma_grad={self._sigma_grad!r}, "
+            f"q={self._q!r}, p_init={self._p_init!r})"
+        )
+
+
 class PriorFreeEwmaVFlat(VFlatEstimator):
     """Prior-free v_flat estimator with ride-time-scaled EWMA.
 
