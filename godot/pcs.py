@@ -164,6 +164,51 @@ def profile_score_final(
     )
 
 
+def climb_centroid(
+    segments: list[RouteSegment],
+    min_climb_length_m: float = 200.0,
+    min_climb_score: float = 1.0,
+) -> float | None:
+    """Weighted centre of mass of climbing difficulty, as a route fraction.
+
+    Each climb's midpoint is weighted by its PCS climb score. The result
+    is a number between 0 (all climbing at the start) and 1 (all climbing
+    at the end). Returns `None` if no qualifying climbs exist.
+
+    Parameters
+    ----------
+    segments : list of RouteSegment
+        Simplified route segments.
+    min_climb_length_m : float, optional
+        Minimum climb length in metres. Default 200.
+    min_climb_score : float, optional
+        Ignore climbs below this score. Default 1.0.
+
+    Returns
+    -------
+    float or None
+        Climb centroid as a fraction of total route distance, or None
+        if the route has no qualifying climbs.
+    """
+    if not segments:
+        return None
+    total_dist = segments[-1].end_distance_m
+    if total_dist <= 0:
+        return None
+    climbs = [
+        c
+        for c in extract_climbs(segments, min_climb_length_m)
+        if c.climb_score >= min_climb_score
+    ]
+    if not climbs:
+        return None
+    weighted_pos = sum(
+        c.climb_score * (c.start_distance_m + c.end_distance_m) / 2 for c in climbs
+    )
+    total_score = sum(c.climb_score for c in climbs)
+    return weighted_pos / (total_dist * total_score)
+
+
 def max_climb_score(
     segments: list[RouteSegment],
     min_climb_length_m: float = 200.0,

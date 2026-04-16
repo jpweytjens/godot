@@ -885,6 +885,108 @@ meter is optional: the no-power variant at 11.6\,\si{\minute} is
 already a 61\,\% reduction from the moving-average baseline.
 
 
+\subsection{Where in the ride does climbing appear?}
+\label{sec:centroid}
+
+The improvement over the moving average depends not only on how much
+climbing a route contains, but on \emph{where} the climbing sits. We
+define the \emph{climb centroid} as the climb-score-weighted centre of
+mass of climbing position, expressed as a fraction of route distance:
+\begin{equation}
+\label{eq:centroid}
+\gamma \;=\;
+\frac{\sum_j s_j \cdot \bar{d}_j}{D \cdot \sum_j s_j},
+\end{equation}
+where $s_j$ is the PCS climb score of climb~$j$, $\bar{d}_j$ is its
+midpoint distance, and $D$ is total route distance. A value of
+$\gamma < 0.4$ means climbing is front-loaded; $0.4 \le \gamma \le
+0.6$ means distributed; $\gamma > 0.6$ means back-loaded.
+
+Table~\ref{tab:centroid} shows the MAE improvement of the
+profile-conditional estimator over the moving average, partitioned by
+centroid bucket and difficulty.
+
+\begin{table}[ht]
+\centering
+\caption{MAE improvement (minutes, higher = better) of the
+profile-conditional estimator over the moving average, by climb
+centroid and route difficulty.}
+\label{tab:centroid}
+\sisetup{round-mode=places, round-precision=1}
+\begin{tabular}{@{} l rrr rrr rrr @{}}
+\toprule
+& \multicolumn{3}{c}{Minor hills} & \multicolumn{3}{c}{Hills}
+& \multicolumn{3}{c}{Mountains} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+Centroid
+  & {$n$} & {MA} & {$\Delta$}
+  & {$n$} & {MA} & {$\Delta$}
+  & {$n$} & {MA} & {$\Delta$} \\
+\midrule
+Front ($\gamma < 0.4$)
+  & 8  & 10.5 & {$+0.2$}
+  & 6  & 29.3 & {$-1.8$}
+  & 3  & 38.3 & {$+24.1$} \\
+Mid ($0.4$--$0.6$)
+  & 18 & 8.3  & {$+0.7$}
+  & 33 & 14.7 & {$+3.9$}
+  & 10 & 26.8 & {$+16.4$} \\
+Back ($\gamma > 0.6$)
+  & 6  & 16.9 & {$+0.3$}
+  & 11 & 19.3 & {$+0.9$}
+  & 1  & 36.0 & {$+19.9$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two mechanisms interact. The physics model provides gradient
+awareness from the first prediction, regardless of where the climbing
+sits --- this is pure \emph{route knowledge} that the moving average
+lacks. The integral corrections provide \emph{calibration} of that
+knowledge, but they need observations to converge. The interplay
+between these two mechanisms explains the centroid pattern.
+
+\paragraph{Physics model quality.}
+The final correction values $\Delta_c$ and $\Delta_d$ reveal how much
+systematic bias the physics model carries before calibration. Across
+the corpus, the median $\Delta_c$ at ride end is 0.98--1.02 on minor
+hills (the model is nearly unbiased), 0.83--0.96 on hills (5--17\,\%
+overestimate of climb speed), and 0.78--0.81 on mountains (a
+$\sim$20\,\% overestimate). The model consistently overpredicts both
+climb speed (rider pushes less hard than the behavioral model
+assumes) and descent speed (rider brakes more than modelled). These
+biases are what the integral corrections exist to absorb.
+
+\paragraph{Correction convergence.}
+On front-loaded mountain rides, the correction at the centroid
+position is still 10.5\,\% away from its final value
+($\Delta_c = 0.72$ vs 0.78). On mid-loaded mountain rides, the gap
+shrinks to 1.5\,\% ($\Delta_c = 0.80$ vs 0.80). The front-loaded
+case is ``physics alone'': the model is doing the heavy lifting with
+a 20\,\% bias that the correction has not yet absorbed. On mountains
+this still produces a $+$24\,\si{\minute} improvement because the
+moving average's error is so catastrophic ($\sim$38\,\si{\minute})
+that even an uncalibrated physics model is vastly better. On hills
+the picture reverses: the physics model's 5--17\,\% bias is
+comparable in magnitude to the moving average's error, so the
+uncalibrated model can be slightly \emph{worse} ($-$1.8\,\si{\minute}
+on front-loaded hills).
+
+Mid-loaded routes are the sweet spot: enough distance has been
+observed for the corrections to converge (gap $\sim$1--3\,\%), and
+enough distance remains for the calibrated model to out-predict the
+moving average. This is where the combination of physics model and
+integral correction is strongest, producing $+$3.9\,\si{\minute}
+on hills and $+$16.4\,\si{\minute} on mountains.
+
+Back-loaded routes show the smallest improvement ($+$0.9 on hills,
+$+$19.9 on mountains) simply because little distance remains when
+the climbing begins --- the moving average's error window shrinks
+faster than the model's advantage can accumulate. Both corrections
+are fully converged, but there is not enough remaining ride for the
+improvement to compound.
+
+
 \section{Summary}
 
 Method~D is a deliberately simple ETA estimator built around two
