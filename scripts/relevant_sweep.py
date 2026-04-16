@@ -22,6 +22,7 @@ from godot.estimators import (
     EmpiricalPowerRelevantSplitEstimator,
     IntegralPhysicsEstimator,
     PhysicsGradientPriorEstimator,
+    ProfileConditionalSplitIntegralPhysicsEstimator,
     RealisticPhysicsEstimator,
     RelevantCalibratedSplitPhysicsEstimator,
     RelevantSplitIntegralPhysicsEstimator,
@@ -268,6 +269,9 @@ def main() -> None:
         all_variants.append(("PhysPrior", tag, RealisticPhysicsEstimator(cfg)))
         all_variants.append(("SingleInt", tag, IntegralPhysicsEstimator(cfg)))
         all_variants.append(("Split", tag, SplitIntegralPhysicsEstimator(cfg)))
+        all_variants.append(
+            ("ProfCond", tag, ProfileConditionalSplitIntegralPhysicsEstimator(cfg))
+        )
         for t in args.thresholds:
             all_variants.append(
                 (
@@ -319,7 +323,10 @@ def main() -> None:
     print("=== all rides ===")
     print(_fmt(pd.DataFrame(rows_all)).to_string(index=False))
     for b in sorted(
-        bucket_counts, key=lambda x: ["flat", "hills", "mountains"].index(x)
+        bucket_counts,
+        key=lambda x: ["pancake", "rolling", "minor_hills", "hills", "mountains"].index(
+            x
+        ),
     ):
         print()
         print(f"=== {b} ({bucket_counts[b]} rides) ===")

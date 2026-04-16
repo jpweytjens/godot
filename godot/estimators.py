@@ -3188,6 +3188,74 @@ class RelevantSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
         )
 
 
+class ProfileConditionalSplitIntegralPhysicsEstimator(
+    RelevantSplitIntegralPhysicsEstimator
+):
+    """Split-integral with route-profile-conditional relevance filtering.
+
+    Uses the PCS max-climb classification at ride start to decide
+    whether to apply the relevance filter:
+
+    - *Mountains* (max climb score >= 50): apply the filter at
+      `min_relevant_s` to protect the integral correction from
+      punchy-wall contamination before a sustained climb.
+    - *Everything else* (flat, rolling, hills): no filter
+      (`min_relevant_s = 0`). On berg-only routes, every short climb
+      IS the signal --- filtering them out removes the only evidence
+      the integrals can learn from.
+
+    On mixed routes (bergs + a mountain pass), the mountain's time
+    dominance means the pass's samples naturally outweigh the bergs
+    in the cumulative integral, so filtering is still appropriate.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    min_relevant_s : float, optional
+        Threshold applied on mountain routes. Default 120 s.
+    mountain_threshold : float, optional
+        PCS max-climb-score cutoff for ``mountains``. Default 50.
+    """
+
+    name = "profile_conditional_split_integral_physics"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        min_relevant_s: float = 120.0,
+        mountain_threshold: float = 50.0,
+    ) -> None:
+        super().__init__(cfg, min_relevant_s=min_relevant_s)
+        self._mountain_threshold = mountain_threshold
+
+    def _extra_row_mask(self, ride: Ride) -> np.ndarray:
+        from godot.pcs import max_climb_score
+
+        mc = max_climb_score(ride.gradient_segments)
+        if mc >= self._mountain_threshold:
+            return _relevant_row_mask(
+                ride, self._ratios, self._v_flat_ms, self._min_relevant_s
+            )
+        return np.ones(len(ride.df), dtype=bool)
+
+    def __str__(self) -> str:
+        return (
+            f"profile-conditional split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h prior, "
+            f"mtn_threshold={self._mountain_threshold:.0f}, "
+            f"t_min={self._min_relevant_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"ProfileConditionalSplitIntegralPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"min_relevant_s={self._min_relevant_s!r}, "
+            f"mountain_threshold={self._mountain_threshold!r})"
+        )
+
+
 class EmpiricalPowerRelevantSplitEstimator(RelevantSplitIntegralPhysicsEstimator):
     """Relevant split-integral using an empirical P(g)/P(0) ratio table.
 

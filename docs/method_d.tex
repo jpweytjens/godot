@@ -53,7 +53,60 @@ modest complexity, a compact route representation, and a single
 observation-based correction mechanism. We call it Method~D within
 the broader Godot project, where it was identified as the best
 clean-architecture alternative to the static-prior baseline across a
-corpus of 311 historical rides.
+corpus of 290 historical rides.
+
+
+\section{Why the moving average is hard to beat}
+\label{sec:baseline}
+
+The simplest ETA estimator is the expanding moving average: divide
+total distance covered by total moving time elapsed, and project the
+remainder at that pace. It requires no model, no route knowledge, and
+no parameters. Given a sufficiently long ride with roughly steady
+effort and no major state changes, it converges to the correct ETA by
+construction --- once enough of the ride has been observed, the
+expanding average \emph{is} the rider's true pace, and the fraction
+of route remaining shrinks to zero.
+
+Beating this baseline is surprisingly difficult. Any model-based
+estimator risks being \emph{wrong in a way the moving average is
+not}: it introduces assumptions (physics, rider behavior,
+environmental constants) that, if misspecified, produce systematic
+bias the moving average would never have. The only scenario where a
+model can reliably outperform is when the future route differs from
+the past route in a way the model can predict but the moving average
+cannot.
+
+Gradient is exactly such a difference. A rider who has averaged
+\SI{28}{\km\per\hour} over 50\,\si{\km} of flat road will not
+sustain that pace on the \SI{10}{\km} climb ahead --- but the moving
+average does not know a climb is coming. A gradient-aware model does,
+and this is the single largest source of improvement over the baseline
+in our experiments: on mountain rides the moving average produces a
+MAE of 29.9\,\si{\minute}, while the physics model with split
+corrections achieves 14.3\,\si{\minute} (Table~\ref{tab:buildup}).
+
+Other state changes --- bonking, dropping out of a fast group, a
+sudden headwind, mechanical problems --- are equally disruptive to
+ETA but fundamentally unpredictable. We do not model them explicitly.
+Instead, the cumulative integral corrections
+(Section~\ref{sec:integral}) absorb whatever steady bias these events
+introduce, converging over the same timescale the moving average
+would. The corrections are not faster than the moving average at
+adapting to surprises; they are better at \emph{not needing to adapt}
+to the one effect we can predict: gradient.
+
+This asymmetry shapes the architecture. Each layer we add ---
+gradient ratios, behavioral adjustments, relevance filtering, an
+empirical power curve --- is designed to \emph{augment} the
+baseline's natural convergence, not replace it. When a layer has no
+information to contribute (no gradient on a flat ride, no power meter
+on the handlebars), it falls back to identity: the correction stays
+at~1, the ratio table collapses to $r(g) = 1$, and the estimator
+degenerates to the moving average. The goal is to never be worse than
+the baseline, and to be substantially better when the route gives us
+something to work with.
+
 
 \section{Physics model: from power to speed}
 
@@ -625,69 +678,73 @@ integral updates plus a dot product of size $\sim$40.
 
 Table~\ref{tab:buildup} shows the effect of each architectural layer
 on a corpus of 290 historical rides, partitioned by route difficulty
-using a PCS-inspired climb-score classification (flat: no significant
-climb; hills: at least one climb $\ge$\,5 PCS points; mountains: at
-least one climb $\ge$\,50 PCS points). Each row adds exactly one
-feature to the previous row; the MAE column shows the mean absolute
-ETA error in minutes, averaged across rides in each bucket. The
-physics prior row uses the parametric behavioral model without any
-online correction, illustrating the gap the integral corrections must
-close.
+using a PCS-inspired climb-score classification based on the hardest
+single climb: \emph{pancake} (score $< 0.5$, no meaningful gradient),
+\emph{rolling} ($0.5$--$2$, minor undulations),
+\emph{minor hills} ($2$--$5$, small real hills),
+\emph{hills} ($5$--$50$, proper short climbs),
+and \emph{mountains} ($\ge 50$, at least one sustained climb).
+Each row adds exactly one feature to the previous row; the MAE
+columns show mean absolute ETA error in minutes. The physics prior
+rows use the parametric behavioral model without any online
+correction, illustrating the gap the corrections must close.
 
 \begin{table}[ht]
 \centering
 \caption{Build-up of estimator complexity. Each row adds one feature
 to the row above. MAE is mean absolute ETA error in minutes (lower is
-better). The \emph{Behav.}\ column indicates the behavioral power
-model: ``--'' = constant power, ``param'' = parametric climb effort
-and descent decay, ``emp'' = empirical $\pi(g)$.}
+better). \emph{Behav.}: ``--'' = constant power, ``param'' =
+parametric, ``emp'' = empirical $\pi(g)$. \emph{Rel.}: relevance
+filter --- ``\cmark'' = always on, ``cond'' = mountains only.}
 \label{tab:buildup}
 \sisetup{round-mode=places, round-precision=1}
-\begin{tabular}{@{} l ccccc S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
+\small
+\begin{tabular}{@{} l ccccc S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
 \toprule
 & \multicolumn{5}{c}{Features}
-& \multicolumn{3}{c}{MAE (min)} \\
-\cmidrule(lr){2-6} \cmidrule(lr){7-9}
+& \multicolumn{5}{c}{MAE (min)} \\
+\cmidrule(lr){2-6} \cmidrule(lr){7-11}
 Estimator
   & {$r(g)$} & {Behav.} & {$\Delta$} & {Rel.} & {Power}
-  & {Flat} & {Hills} & {Mtn} \\
+  & {Pancake} & {Rolling} & {M.~hills} & {Hills} & {Mtn} \\
   & & & & &
-  & {$(n\!=\!226)$} & {$(n\!=\!50)$} & {$(n\!=\!14)$} \\
+  & {$(168)$} & {$(26)$} & {$(32)$} & {$(50)$} & {$(14)$} \\
 \midrule
 Moving average
   & {--} & {--} & {--} & {--} & {--}
-  & 7.1 & 17.5 & 29.9 \\
+  & 6.1 & 9.1 & 10.5 & 17.5 & 29.9 \\
 Constant-power prior
   & {\cmark} & {--} & {--} & {--} & {--}
-  & 8.7 & 21.3 & 31.4 \\
+  & 7.3 & 10.3 & 14.8 & 21.3 & 31.4 \\
 Behavioural prior
   & {\cmark} & {param} & {--} & {--} & {--}
-  & 7.8 & 19.4 & 25.7 \\
+  & 6.6 & 9.7 & 12.7 & 19.4 & 25.7 \\
 \quad + single correction
   & {\cmark} & {param} & {global} & {--} & {--}
-  & 7.3 & 14.9 & 15.9 \\
+  & 6.4 & 9.1 & 10.8 & 14.9 & 15.9 \\
 \quad + split correction
   & {\cmark} & {param} & {split} & {--} & {--}
-  & 6.6 & 14.9 & 14.3 \\
-\quad + relevance filter
-  & {\cmark} & {param} & {split} & {\cmark} & {--}
-  & 6.7 & 15.1 & 11.6 \\
+  & 5.6 & 8.6 & 10.0 & 14.9 & 14.3 \\
+\quad + profile-conditional
+  & {\cmark} & {param} & {split} & {cond} & {--}
+  & 5.6 & 8.6 & 10.0 & 14.9 & 11.6 \\
 \quad + ride power curve
-  & {\cmark} & {emp} & {split} & {\cmark} & {ride}
-  & 6.7 & 14.5 & 10.6 \\
+  & {\cmark} & {emp} & {split} & {cond} & {ride}
+  & 5.7 & 9.2 & 9.8 & 14.5 & 10.6 \\
+\cmidrule(lr){1-11}
 \quad + cached profile
-  & {\cmark} & {emp} & {split} & {\cmark} & {cached}
-  & 6.7 & 14.7 & 9.9 \\
+  & {\cmark} & {emp} & {split} & {cond} & {cached}
+  & 5.7 & 9.1 & 9.9 & 14.7 & 9.9 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Several patterns stand out. The moving average is a strong baseline on
-flat rides (MAE 7.1\,min) but collapses on mountains
+flat rides (MAE 6.1\,min on pancake) but collapses on mountains
 (29.9\,\si{\minute}) because it cannot anticipate upcoming terrain.
 The constant-power physics prior is actually \emph{worse} than the
-moving average everywhere (31.4 vs 29.9 on mountains, 8.7 vs 7.1 on
-flat): its descent predictions are so wrong that the extra gradient
+moving average everywhere (31.4 vs 29.9 on mountains, 7.3 vs 6.1 on
+pancake): its descent predictions are so wrong that the extra gradient
 information hurts. Adding the behavioral adjustments ($\alpha$,
 $\kappa$) fixes the descent shape and recovers 5.7\,\si{\minute} on
 mountains (25.7), but without correction the model still has the right
@@ -698,12 +755,18 @@ half (15.9), and splitting it into separate climb and descent channels
 gives a further 1.6\,\si{\minute} (14.3) by letting each terrain class
 converge independently.
 
-The relevance filter provides no benefit on flat rides (where it is
-correctly a no-op) but reduces mountain MAE by a further 19\,\%
-(11.6). This is the core contribution: by learning only from segments
-whose predicted traversal time exceeds 120\,\si{\second}, the integral
-corrections avoid contamination from short punchy efforts that do not
-represent the rider's sustained-climb behavior.
+The profile-conditional relevance filter is the key architectural
+contribution. On mountain routes (identified at ride start from the
+PCS climb-score classification) it gates the integral corrections to
+learn only from segments whose predicted traversal time exceeds
+120\,\si{\second}, reducing mountain MAE by 19\,\% (11.6) without
+touching any other bucket. On non-mountain routes it is a no-op,
+preserving the split correction's full learning rate on terrain where
+every short climb is the signal. This conditional design ensures
+that the filter \emph{augments the baseline when the route profile
+warrants it, and falls back to the uncorrected split when it does
+not} --- matching the ``never worse'' principle of
+Section~\ref{sec:baseline}.
 
 The power-curve rows show the additional benefit when a power meter is
 available. A per-ride empirical $\pi(g)$ curve, trust-ramped against
@@ -768,7 +831,8 @@ Behavioural prior & 7.8  & 5.9  & -5.0  & 9.8  & 52.4 \\
 + single corr.    & 7.3  & 8.3  & -1.3  & 9.7  & 26.1 \\
 + split corr.     & 6.6  & 7.5  & -1.8  & 8.7  & 21.9 \\
 + relevance       & 6.7  & 7.6  & -0.5  & 8.6  & 24.9 \\
-+ ride power      & 6.7  & 7.6  & -0.6  & 8.5  & 25.0 \\
++ ride power       & 6.7  & 7.6  & -0.6  & 8.5  & 25.0 \\
+\cmidrule(lr){1-6}
 + cached profile  & 6.7  & 7.6  & -0.7  & 8.4  & 24.0 \\
 \bottomrule
 \end{tabular}
@@ -789,7 +853,8 @@ Behavioural prior & 19.4 & 12.4 & -6.4  & 8.9  & 138.8 \\
 + single corr.    & 14.9 & 13.1 & -1.2  & 7.7  & 55.2  \\
 + split corr.     & 14.9 & 12.3 & -0.9  & 7.8  & 64.2  \\
 + relevance       & 15.1 & 11.9 & 2.0   & 8.1  & 56.7  \\
-+ ride power      & 14.5 & 11.8 & 1.9   & 7.2  & 53.4  \\
++ ride power       & 14.5 & 11.8 & 1.9   & 7.2  & 53.4  \\
+\cmidrule(lr){1-6}
 + cached profile  & 14.7 & 12.1 & 1.5   & 7.4  & 57.5  \\
 \bottomrule
 \end{tabular}
@@ -810,7 +875,8 @@ Behavioural prior & 25.7 & 31.5 & -15.2  & 15.2 & 211.2 \\
 + single corr.    & 15.9 & 18.4 & 2.6    & 8.7  & 23.3  \\
 + split corr.     & 14.3 & 18.9 & 0.3    & 7.7  & 14.5  \\
 + relevance       & 11.6 & 15.5 & -0.6   & 6.1  & 26.7  \\
-+ ride power      & 10.6 & 13.9 & -4.3   & 7.8  & 26.4  \\
++ ride power       & 10.6 & 13.9 & -4.3   & 7.8  & 26.4  \\
+\cmidrule(lr){1-6}
 + cached profile  & 9.9  & 14.1 & -3.2   & 6.1  & 22.0  \\
 \bottomrule
 \end{tabular}

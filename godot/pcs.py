@@ -203,7 +203,7 @@ class MaxClimbClassification:
     irrelevant for that.
     """
 
-    difficulty: str  # "flat" | "hills" | "mountains"
+    difficulty: str  # "pancake" | "rolling" | "minor_hills" | "hills" | "mountains"
     max_climb_score: float
     cumulative_climb_score: float
     n_climbs: int
@@ -211,6 +211,8 @@ class MaxClimbClassification:
 
 def classify_by_max_climb(
     segments: list[RouteSegment],
+    pancake_threshold: float = 0.5,
+    rolling_threshold: float = 2.0,
     flat_threshold: float = 5.0,
     mountain_threshold: float = 50.0,
     min_climb_length_m: float = 200.0,
@@ -218,30 +220,36 @@ def classify_by_max_climb(
 ) -> MaxClimbClassification:
     """Classify a route by its hardest climb (PCS-inspired).
 
-    Rules
-    -----
-    - *flat*: no climb with score ≥ `flat_threshold`
-    - *hills*: hardest climb in `[flat_threshold, mountain_threshold)`
-    - *mountains*: hardest climb ≥ `mountain_threshold`
+    Uses five difficulty levels that reflect the estimator's behavior
+    at each tier:
+
+    - *pancake*: max climb score < 0.5 — no meaningful gradient at all.
+      Gradient-aware estimation adds nothing over a moving average.
+    - *rolling*: max climb score in [0.5, 2) — minor undulations.
+      The physics model helps slightly; corrections are noise.
+    - *minor_hills*: max climb score in [2, 5) — small but real hills.
+      Gradient awareness helps; short climbs are the signal.
+    - *hills*: max climb score in [5, 50) — proper climbs but
+      individually short (Belgian bergs, Flemish classics).
+    - *mountains*: max climb score >= 50 — at least one sustained
+      climb (≈ 10 km @ 4.5% or 5 km @ 6.3%).
 
     Parameters
     ----------
     segments : list of RouteSegment
         Simplified route segments.
+    pancake_threshold : float, optional
+        Score cutoff between pancake and rolling. Default 0.5.
+    rolling_threshold : float, optional
+        Score cutoff between rolling and minor_hills. Default 2.0.
     flat_threshold : float, optional
-        Score cutoff between flat and hills. Default 5 (≈ 1 km @ 4.5%
-        or similar — the smallest climb that a gradient-aware
-        estimator should measurably beat a flat baseline on).
+        Score cutoff between minor_hills and hills. Default 5.0.
     mountain_threshold : float, optional
-        Score cutoff between hills and mountains. Default 50
-        (≈ 10 km @ 4.5% or 5 km @ 6.3%).
+        Score cutoff between hills and mountains. Default 50.0.
     min_climb_length_m : float, optional
-        Minimum climb length to consider, in metres. Default 200 (PCS
-        default for steepness computation).
+        Minimum climb length in metres. Default 200.
     min_climb_score : float, optional
-        Ignore climbs below this score when counting and summing.
-        Default 1.0 — drops noise from 200-300 m bumps without
-        affecting real muurkes.
+        Ignore climbs below this score. Default 1.0.
 
     Returns
     -------
@@ -255,8 +263,12 @@ def classify_by_max_climb(
     max_score = max((c.climb_score for c in climbs), default=0.0)
     cum_score = sum(c.climb_score for c in climbs)
 
-    if max_score < flat_threshold:
-        difficulty = "flat"
+    if max_score < pancake_threshold:
+        difficulty = "pancake"
+    elif max_score < rolling_threshold:
+        difficulty = "rolling"
+    elif max_score < flat_threshold:
+        difficulty = "minor_hills"
     elif max_score < mountain_threshold:
         difficulty = "hills"
     else:
