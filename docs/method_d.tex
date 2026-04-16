@@ -96,6 +96,70 @@ would. The corrections are not faster than the moving average at
 adapting to surprises; they are better at \emph{not needing to adapt}
 to the one effect we can predict: gradient.
 
+We can make this concrete. Suppose a rider has averaged speed
+$v_{\text{avg}}$ over the first fraction $f$ of a ride of total
+distance~$D$. The moving average predicts the remaining
+$(1 - f) \cdot D$ at $v_{\text{avg}}$. If the remaining portion's
+true average speed is $v_{\text{true}} = \rho \cdot v_{\text{avg}}$
+(where $\rho < 1$ means the rider is slower, e.g.\ climbing), the
+absolute ETA error is
+\begin{equation}
+\label{eq:ma-error}
+\varepsilon \;=\; (1 - f) \cdot \frac{D}{v_{\text{avg}}}
+  \cdot \Big(1 - \frac{1}{\rho}\Big).
+\end{equation}
+Two features are worth noting. First, the \emph{relative} error
+$\varepsilon / T_{\text{remaining}} = \rho - 1$ does not depend on
+$f$~--- the moving average is always wrong by the same fraction of
+the remaining time. Second, the \emph{absolute} error shrinks with
+$(1 - f)$ because there is less distance left to be wrong about.
+This is why the moving average converges: not because it gets smarter
+about the terrain ahead, but because the window over which it is
+wrong shrinks to zero.
+
+Table~\ref{tab:ma-error} shows the absolute error for a
+\SI{5}{\hour} ride at $v_{\text{avg}} = \SI{29}{\km\per\hour}$, for
+several speed ratios $\rho$ and ride fractions $f$. A rider who has
+averaged \SI{29}{\km\per\hour} over 50\,\% of a ride and faces a
+remaining portion at $\rho = 0.5$ (a steep sustained climb, roughly
+\SI{14.5}{\km\per\hour}) will see a moving-average ETA that is
+\SI{2.5}{\hour} too short. Even at $\rho = 0.7$ (a moderate climb)
+and 70\,\% complete, the error is still 37\,\si{\minute}.
+
+\begin{table}[ht]
+\centering
+\caption{Absolute ETA error of the moving average (minutes) on a
+\SI{5}{\hour} ride when the remaining portion differs from the
+historical pace by a factor~$\rho$. Negative values indicate
+underestimated remaining time (arrival later than predicted).}
+\label{tab:ma-error}
+\sisetup{round-mode=places, round-precision=0}
+\begin{tabular}{@{} l S[table-format=-3.0] S[table-format=-3.0] S[table-format=-3.0] S[table-format=-3.0] S[table-format=-3.0] @{}}
+\toprule
+& \multicolumn{5}{c}{Ride fraction completed ($f$)} \\
+\cmidrule(lr){2-6}
+{$\rho = v_{\text{true}}/v_{\text{avg}}$}
+  & {10\,\%} & {30\,\%} & {50\,\%} & {70\,\%} & {90\,\%} \\
+\midrule
+0.5 (steep climb)     & -270 & -210 & -150 & -90  & -30 \\
+0.6                   & -180 & -140 & -100 & -60  & -20 \\
+0.7 (moderate climb)  & -116 & -90  & -64  & -39  & -13 \\
+0.8                   & -68  & -53  & -38  & -23  & -8  \\
+0.9 (rolling)         & -30  & -23  & -17  & -10  & -3  \\
+1.2 (tailwind/descent)& 45   & 35   & 25   & 15   & 5   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A gradient-aware estimator sidesteps this entirely. Because it knows
+the remaining route contains a climb at gradient~$g$ and has a ratio
+table $r(g)$ that predicts the speed reduction, it does not need to
+wait for the rider to actually slow down before adjusting the
+prediction. The error in equation~\eqref{eq:ma-error} is replaced by
+the much smaller residual between the physics model's ratio and the
+rider's true ratio at that gradient --- typically a few percent rather
+than a factor of two.
+
 This asymmetry shapes the architecture. Each layer we add ---
 gradient ratios, behavioral adjustments, relevance filtering, an
 empirical power curve --- is designed to \emph{augment} the
@@ -106,6 +170,50 @@ at~1, the ratio table collapses to $r(g) = 1$, and the estimator
 degenerates to the moving average. The goal is to never be worse than
 the baseline, and to be substantially better when the route gives us
 something to work with.
+
+
+\section{Handling pauses}
+\label{sec:pauses}
+
+A rider who stops for coffee, waits at a traffic light, or fixes a
+flat tire is not generating useful speed observations. How the
+estimator treats these pauses has a large effect on prediction
+stability.
+
+The naive approach is to use \emph{total elapsed time} as the
+denominator: $v_{\text{avg}} = d / t_{\text{elapsed}}$. This makes
+the average speed drop during every pause, and the longer the pause,
+the lower the average, and the higher the predicted remaining time.
+The behavior mirrors the gradient problem in
+Table~\ref{tab:ma-error}: the rider's speed appears to drop (to
+zero, in fact), and the estimator responds by inflating the ETA
+for the entire remaining route. A 20-minute coffee stop on a
+3-hour ride can add 30+ minutes to the prediction, all of which
+vanishes the moment the rider clips back in and the average
+recovers. The result is an ETA that swings wildly around every stop.
+
+The better approach, and the one we use throughout, is to track
+\emph{moving time} only. Rows where the rider is stationary (speed
+below a threshold, or a gap in timestamps exceeding a few seconds)
+are flagged as paused and excluded from all accumulators: the
+expanding average, the integral corrections, and the histogram
+update. The estimator predicts remaining \emph{moving time}, which
+is unaffected by how long the rider has been standing still.
+
+To convert to a wall-clock ETA, we simply add the observed pause
+time so far to the moving-time prediction:
+\begin{equation}
+\text{ETA}_{\text{wall}} \;=\;
+  \text{ETA}_{\text{moving}} \;+\; t_{\text{paused}}.
+\end{equation}
+This has two benefits. First, the remaining moving time is stable
+across pauses --- a coffee stop does not cause the prediction to
+spike. Second, the split between moving time and pause time is
+transparent to the rider: they know better than any model whether
+another stop is coming (a planned lunch) and know as little as the
+model about unplanned stops (a mechanical). By separating the two,
+the estimator handles what it can predict (moving pace) and leaves
+what it cannot (future pauses) to the rider's own judgment.
 
 
 \section{Physics model: from power to speed}
