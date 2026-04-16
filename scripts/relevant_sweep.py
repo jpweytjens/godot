@@ -18,8 +18,7 @@ import pandas as pd
 from godot.benchmark import backtest, compute_metrics
 from godot.config import RideConfig
 from godot.estimators import (
-    RelevantDynamicSplitPhysicsEstimator,
-    RelevantIntegralDynamicSplitPhysicsEstimator,
+    RelevantCalibratedSplitPhysicsEstimator,
     RelevantSplitIntegralPhysicsEstimator,
     SplitIntegralPhysicsEstimator,
 )
@@ -83,7 +82,16 @@ def main() -> None:
         "--thresholds",
         nargs="+",
         type=float,
-        default=[60.0, 120.0, 180.0, 300.0, 600.0],
+        default=[120.0],
+    )
+    parser.add_argument(
+        "--v-flat",
+        nargs="+",
+        type=float,
+        default=[28.8],
+        dest="v_flat_priors",
+        metavar="KMH",
+        help="v_flat prior(s) to sweep (default: 28.8)",
     )
     args = parser.parse_args()
 
@@ -105,37 +113,30 @@ def main() -> None:
     print(f"difficulty: {bucket_counts}")
     print()
 
-    cfg = RideConfig()
-
-    variants = [("Split (baseline)", "-", SplitIntegralPhysicsEstimator(cfg))]
-    for t in args.thresholds:
-        variants.append(
-            (
-                "Relevant",
-                f"{t:.0f}",
-                RelevantSplitIntegralPhysicsEstimator(cfg, min_relevant_s=t),
+    all_variants: list[tuple[str, str, object]] = []
+    for v_flat_kmh in args.v_flat_priors:
+        cfg = RideConfig(v_flat_kmh=v_flat_kmh)
+        tag = f"v={v_flat_kmh:.0f}"
+        all_variants.append(("Split", tag, SplitIntegralPhysicsEstimator(cfg)))
+        for t in args.thresholds:
+            all_variants.append(
+                (
+                    "Relevant",
+                    tag,
+                    RelevantSplitIntegralPhysicsEstimator(cfg, min_relevant_s=t),
+                )
             )
-        )
-    for t in args.thresholds:
-        variants.append(
-            (
-                "RelInt+Dyn",
-                f"{t:.0f}",
-                RelevantIntegralDynamicSplitPhysicsEstimator(cfg, min_relevant_s=t),
+            all_variants.append(
+                (
+                    "RelCalib",
+                    tag,
+                    RelevantCalibratedSplitPhysicsEstimator(cfg, min_relevant_s=t),
+                )
             )
-        )
-    for t in args.thresholds:
-        variants.append(
-            (
-                "RelDyn(both)",
-                f"{t:.0f}",
-                RelevantDynamicSplitPhysicsEstimator(cfg, min_relevant_s=t),
-            )
-        )
 
     rows_all = []
     rows_by_bucket: dict[str, list] = {b: [] for b in bucket_counts}
-    for name, tag, est in variants:
+    for name, tag, est in all_variants:
         per_ride = score(est, rides)
         rows_all.append({"estimator": name, "t_min_s": tag, **summary(per_ride)})
         for b in bucket_counts:

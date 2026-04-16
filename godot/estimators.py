@@ -3099,11 +3099,80 @@ class RelevantSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
             f"t_min={self._min_relevant_s:.0f}s)"
         )
 
+    def _est_ride_time_s(self, ride: Ride) -> float:
+        """Estimate total ride time from VW segments at the prior v_flat."""
+        return sum(
+            (s.end_distance_m - s.start_distance_m)
+            / max(0.5, self._v_flat_ms * self._ratio_for(s.gradient))
+            for s in ride.gradient_segments
+        )
+
     def __repr__(self) -> str:
         return (
             f"RelevantSplitIntegralPhysicsEstimator("
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"min_relevant_s={self._min_relevant_s!r})"
+        )
+
+
+class AdaptiveRelevantSplitIntegralPhysicsEstimator(
+    RelevantSplitIntegralPhysicsEstimator
+):
+    """Relevance-gated split-integral with a ride-length-adaptive threshold.
+
+    Instead of a fixed `min_relevant_s`, the threshold is computed as
+
+        max(floor_s, relevant_fraction × estimated_ride_time)
+
+    so that a 4-hour mountain ride only learns from segments worth 7+
+    minutes (3% × 14400 s) while a 45-minute crit learns from 80 s
+    segments. Adapts the definition of "material" to the ride's
+    time scale, using the prior `v_flat` and VW segments to estimate
+    total ride time before the ride starts.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    relevant_fraction : float, optional
+        Fraction of estimated ride time below which a segment is
+        non-relevant. Default 0.03 (3%).
+    floor_s : float, optional
+        Minimum threshold regardless of ride length. Default 60 s
+        (below this, even steady-state rider intent is questionable).
+    """
+
+    name = "adaptive_relevant_split_integral_physics"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        relevant_fraction: float = 0.03,
+        floor_s: float = 60.0,
+    ) -> None:
+        super().__init__(cfg, min_relevant_s=floor_s)
+        self._relevant_fraction = relevant_fraction
+        self._floor_s = floor_s
+
+    def _extra_row_mask(self, ride: Ride) -> np.ndarray:
+        est_time = self._est_ride_time_s(ride)
+        threshold = max(self._floor_s, self._relevant_fraction * est_time)
+        return _relevant_row_mask(ride, self._ratios, self._v_flat_ms, threshold)
+
+    def __str__(self) -> str:
+        return (
+            f"adaptive relevant split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h prior, "
+            f"fraction={self._relevant_fraction:.0%}, "
+            f"floor={self._floor_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"AdaptiveRelevantSplitIntegralPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"relevant_fraction={self._relevant_fraction!r}, "
+            f"floor_s={self._floor_s!r})"
         )
 
 
@@ -3663,6 +3732,61 @@ class CalibratedVerySplitPhysicsEstimator(
             f"CalibratedVerySplitPhysicsEstimator("
             f"mass_kg={self._mass_kg!r}, "
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"warmup_fraction={self._warmup_fraction!r})"
+        )
+
+
+class RelevantCalibratedSplitPhysicsEstimator(
+    _CalibratedSplitMixin, RelevantSplitIntegralPhysicsEstimator
+):
+    """Warmup-handoff v_flat with relevance-gated split integrals.
+
+    During warmup (default 10% of ride): `PriorFreeVFlat` estimates
+    v_flat from all samples (unfiltered). At the warmup row, v_flat is
+    frozen, the ratio table rebuilt at the new operating point, and
+    the split integrals start fresh — gated to ETA-relevant segments
+    via `_extra_row_mask`.
+
+    Addresses misspecified priors: if `cfg.v_flat_kmh` is wrong, the
+    warmup corrects it before the integral corrections kick in.
+    v_flat itself is *not* relevance-gated (full sample pool, as we
+    showed that gating starves PriorFreeVFlat).
+    """
+
+    name = "relevant_split_integral_physics"
+    level = 5
+    vflat_source = "calibrated_priorfree"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        min_relevant_s: float = 120.0,
+        warmup_fraction: float = 0.10,
+        min_warmup_s: float = 180.0,
+        max_warmup_s: float = 600.0,
+    ) -> None:
+        super().__init__(cfg, min_relevant_s=min_relevant_s)
+        self._vflat_est = PriorFreeVFlat()
+        self._warmup_fraction = warmup_fraction
+        self._min_warmup_s = min_warmup_s
+        self._max_warmup_s = max_warmup_s
+
+    @staticmethod
+    def _rebuild_ratios(new_cfg: RideConfig) -> dict[int, float]:
+        return new_cfg.realistic_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"relevant calibrated split-integral physics "
+            f"(warmup {self._warmup_fraction:.0%}, "
+            f"t_min={self._min_relevant_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"RelevantCalibratedSplitPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"min_relevant_s={self._min_relevant_s!r}, "
             f"warmup_fraction={self._warmup_fraction!r})"
         )
 
