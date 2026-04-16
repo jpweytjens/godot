@@ -1,16 +1,12 @@
 % -- Fonts (requires lualatex or xelatex) --
 \usepackage[sfdefault,lining]{FiraSans}
-\usepackage[fakebold]{firamath-otf}
-\renewcommand*\oldstylenums[1]{{\firaoldstyle #1}}
+\usepackage{amsmath}
+\usepackage[mathrm=sym, mathbf=sym]{unicode-math}
+\setmathfont{Fira Math}
 
 % -- Layout & typography --
 \usepackage{microtype}
 \usepackage[margin=2.5cm]{geometry}
-
-% -- Math --
-% amssymb is omitted: firamath-otf loads unicode-math which provides
-% all AMS symbols and conflicts with amssymb's definitions.
-\usepackage{amsmath}
 
 % -- Tables & figures --
 \usepackage{booktabs}
