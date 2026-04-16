@@ -954,6 +954,14 @@ Estimator
   & & & & &
   & {$(168)$} & {$(26)$} & {$(32)$} & {$(50)$} & {$(14)$} \\
 \midrule
+\rowcolor{black!5}
+Oracle naive ($v_\text{true}$)
+  & {--} & {--} & {--} & {--} & {--}
+  & {--} & {--} & 3.4 & 5.1 & 11.5 \\
+\rowcolor{black!5}
+Oracle corrections
+  & {\cmark} & {tuned} & {4-dur} & {cond} & {--}
+  & {--} & {--} & 3.3 & 4.7 & 12.6 \\
 \midrule
 Moving average
   & {--} & {--} & {--} & {--} & {--}
@@ -1058,38 +1066,34 @@ $\gamma < 0.4$ means climbing is front-loaded; $0.4 \le \gamma \le
 0.6$ means distributed; $\gamma > 0.6$ means back-loaded.
 
 Table~\ref{tab:centroid} shows the MAE improvement of the
-profile-conditional estimator over the moving average, partitioned by
-centroid bucket and difficulty.
+4-dur + adaptive estimator over the moving average on the full
+737-ride corpus, partitioned by centroid bucket and difficulty.
 
 \begin{table}[ht]
 \centering
 \caption{MAE improvement (minutes, higher = better) of the
-profile-conditional estimator over the moving average, by climb
-centroid and route difficulty.}
+4-dur + adaptive estimator over the moving average, by climb
+centroid and route difficulty ($n = 737$ rides).}
 \label{tab:centroid}
 \sisetup{round-mode=places, round-precision=1}
-\begin{tabular}{@{} l rrr rrr rrr @{}}
+\begin{tabular}{@{} l rrr rrr @{}}
 \toprule
-& \multicolumn{3}{c}{Minor hills} & \multicolumn{3}{c}{Hills}
-& \multicolumn{3}{c}{Mountains} \\
-\cmidrule(lr){2-4} \cmidrule(lr){5-7} \cmidrule(lr){8-10}
+& \multicolumn{3}{c}{Hills ($n = 132$)}
+& \multicolumn{3}{c}{Mountains ($n = 29$)} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
 Centroid
-  & {$n$} & {MA} & {$\Delta$}
   & {$n$} & {MA} & {$\Delta$}
   & {$n$} & {MA} & {$\Delta$} \\
 \midrule
 Front ($\gamma < 0.4$)
-  & 8  & 10.5 & {$+0.2$}
-  & 6  & 29.3 & {$-1.8$}
-  & 3  & 38.3 & {$+24.1$} \\
+  & 24 & 22.8 & {$+5.9$}
+  & 9  & 38.4 & {$+25.3$} \\
 Mid ($0.4$--$0.6$)
-  & 18 & 8.3  & {$+0.7$}
-  & 33 & 14.7 & {$+3.9$}
-  & 10 & 26.8 & {$+16.4$} \\
+  & 83 & 12.7 & {$+2.1$}
+  & 19 & 31.2 & {$+16.8$} \\
 Back ($\gamma > 0.6$)
-  & 6  & 16.9 & {$+0.3$}
-  & 11 & 19.3 & {$+0.9$}
-  & 1  & 36.0 & {$+19.9$} \\
+  & 25 & 14.1 & {$+2.6$}
+  & 1  & 34.9 & {$+19.4$} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1177,18 +1181,18 @@ online rather than knowing them in advance.}
 \sisetup{round-mode=places, round-precision=1}
 \begin{tabular}{@{} l S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
 \toprule
-& {Pancake} & {Rolling} & {M.~hills} & {Hills} & {Mtn} \\
-& {$(168)$} & {$(26)$} & {$(32)$} & {$(50)$} & {$(14)$} \\
+& {M.~hills} & {Hills} & {Mtn} \\
+& {$(89)$} & {$(132)$} & {$(29)$} \\
 \midrule
 Oracle naive ($v_\text{true}$, no physics)
-  & 1.8 & 2.7 & 3.8 & 5.6 & 11.3 \\
+  & 3.4 & 5.1 & 11.5 \\
 Oracle corrections (physics, perfect $\Delta$)
-  & 2.8 & 3.5 & 5.0 & 5.3 & 8.2 \\
+  & 3.3 & 4.7 & 12.6 \\
 \midrule
-Duration-bucketed (real estimator)
-  & 5.8 & 8.7 & 10.5 & 14.3 & 12.1 \\
-Naive with prior ($v = \SI{29}{\km\per\hour}$)
-  & 6.7 & 9.4 & 10.6 & 17.0 & 22.2 \\
+4-dur + adaptive (real estimator)
+  & 9.2 & 12.0 & 14.0 \\
+Moving average
+  & 10.0 & 14.8 & 33.6 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1197,47 +1201,38 @@ Three findings emerge from Table~\ref{tab:oracle}.
 
 \paragraph{The within-ride variability floor.}
 Even knowing the rider's true average speed perfectly, the oracle
-naive achieves only 5.6\,\si{\minute} on hills and 11.3 on
+naive achieves only 5.1\,\si{\minute} on hills and 11.5 on
 mountains --- not zero. The residual is from pace variation
 \emph{within} the ride: fatigue in the second half, headwind on the
 return leg, group dynamics, variable effort across different bergs.
-No constant-speed model can go below this floor. It is lowest on
-pancake rides (1.8\,\si{\minute}, steady riding) and highest on
-mountains (11.3, where the speed swings between 15\,\si{\km\per\hour}
-climbing and 40\,\si{\km\per\hour} descending are sustained and
-large).
+No constant-speed model can go below this floor.
 
-\paragraph{Physics helps --- when calibrated.}
-Oracle corrections beat oracle naive on every category: 5.3 vs 5.6 on
-hills, 8.2 vs 11.3 on mountains. The physics model \emph{does}
-reduce error below the constant-speed floor, because it predicts
-per-segment speed rather than projecting one average. On mountains
-the gain is 3.1\,\si{\minute} --- gradient awareness earns its keep
-by anticipating the speed difference between sustained climbs and
-descents. On hills the gain is small (0.3\,\si{\minute}) but
-positive: even on mixed terrain, per-gradient predictions outperform
-the aggregate when the corrections are perfectly calibrated.
+\paragraph{Physics helps on hills, hurts on mountains.}
+On hills, oracle corrections (4.7) beat oracle naive (5.1) by
+0.4\,\si{\minute} --- per-gradient predictions outperform the
+aggregate when perfectly calibrated. On mountains, however, oracle
+corrections (12.6) are \emph{worse} than oracle naive (11.5). This
+reversal, absent in the smaller 290-ride corpus, appears because the
+expanded mountain set (29 rides) includes more diverse terrain where
+the ratio table's per-gradient shape errors are correlated and do not
+cancel. The naive model's error-cancellation property is more
+valuable than per-segment accuracy on these rides. This finding
+suggests that the behavioral parameters ($\alpha = 0.25$,
+$\kappa = 0.45$) tuned on the original 14 mountain rides do not
+generalise to the broader mountain corpus and need retuning --- or
+that the mountain category itself is too heterogeneous for a single
+parameter set.
 
-\paragraph{Convergence is the dominant cost.}
+\paragraph{Convergence remains the dominant cost on hills.}
 The gap between oracle corrections and the real estimator is
-9.0\,\si{\minute} on hills and 3.9 on mountains. This is pure
-convergence overhead: the integral corrections have not reached their
-final values while the ride is in progress. On hills, where rides
-are short and climb durations diverse, the corrections learn slowly;
-on mountains, where one long climb dominates, they converge quickly.
-The naive-with-prior baseline (17.0 on hills) confirms that
-\emph{not} using physics is worse than using imperfectly calibrated
-physics --- the gradient awareness saves 2.7\,\si{\minute} even
-during the convergence period.
-
-The practical implication is that the largest remaining gains lie not
-in better physics or more correction channels, but in
-\emph{faster convergence of the corrections toward their final
-values}. Cross-ride parameter learning
-(Section~\ref{sec:cross-ride}), warm-start priors, and accurate
-$v_\text{flat}$ estimation are the levers that close this gap.
-Every minute shaved from the convergence period is a minute of
-improved prediction on every ride, across every difficulty tier.
+7.3\,\si{\minute} on hills (4.7 vs 12.0). On mountains the gap is
+only 1.4\,\si{\minute} (12.6 vs 14.0), but this is misleading:
+the oracle corrections themselves are already worse than the naive
+floor, so the physics model's ceiling on mountains is set by its
+shape quality, not by convergence speed. The practical implication
+differs by terrain: on hills, faster convergence is the lever; on
+mountains, better shape (retuned $\alpha$/$\kappa$ or the empirical
+power curve) is the lever.
 
 
 \subsection{When does physics help?}
