@@ -306,6 +306,39 @@ table versus 2.4--2.7$\times$ in the constant-power table. The
 behavioral model is therefore less sensitive to $v_{\text{flat}}$
 misspecification during the warmup phase described below.
 
+\subsection{Route-adaptive behavioral parameters}
+\label{sec:route-adaptive}
+
+The behavioral parameters $\alpha$ and $\kappa$ encode a pacing
+assumption: how hard does a typical rider push on climbs, and how much
+do they back off on descents? But pacing is not a fixed trait --- it
+depends on what the rider knows about the route ahead. A rider facing
+a single 2\,\si{\km} hill on a flat century will stand up and hammer
+it; the same rider facing a 30\,\si{\km} Alpine pass will settle into
+a sustainable rhythm well below their short-effort ceiling. Descents
+follow a similar pattern: mountain descents are steeper, longer, and
+more technical, leading to more braking than the gentle slopes of a
+rolling ride.
+
+We can exploit this by selecting $\alpha$ and $\kappa$ based on the
+route's difficulty classification, which is known at ride start from
+the VW segments. The integral corrections' final values across our
+corpus reveal the systematic bias at each difficulty tier: the
+parametric model overpredicts climb speed by $\sim$20\,\% on
+mountains ($\Delta_c \approx 0.80$), $\sim$7\,\% on hills
+($\Delta_c \approx 0.93$), and $\sim$0\,\% on minor hills
+($\Delta_c \approx 1.00$). Descent speed is overpredicted by
+6--15\,\% across all categories ($\Delta_d \approx 0.85$--$0.94$).
+
+Reducing $\alpha$ for harder routes and reducing $\kappa$ globally
+brings the physics model closer to reality \emph{before the
+corrections have any data}. The practical effect is largest on
+front-loaded routes, where the corrections have not yet converged and
+the raw physics model carries the full prediction burden. On our
+corpus, route-adaptive parameters reduce mountain MAE from
+11.6 to 9.8\,\si{\minute} --- matching the empirical power curve's
+result without requiring a power meter or rider history.
+
 \subsection{What we assume}
 
 The physics model requires the following inputs:

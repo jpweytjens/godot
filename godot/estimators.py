@@ -3256,6 +3256,112 @@ class ProfileConditionalSplitIntegralPhysicsEstimator(
         )
 
 
+class RouteAdaptiveSplitIntegralPhysicsEstimator(
+    ProfileConditionalSplitIntegralPhysicsEstimator
+):
+    """Profile-conditional estimator with route-adaptive physics parameters.
+
+    Extends `ProfileConditionalSplitIntegralPhysicsEstimator` by selecting
+    the behavioral physics parameters (`climb_effort`, `descent_confidence`)
+    based on the route's PCS difficulty category. Harder routes get lower
+    `climb_effort` (rider paces for the long haul) and lower
+    `descent_confidence` (more braking on mountain descents).
+
+    The ratio table is rebuilt at ride start from the category-matched
+    parameters, so the physics model starts closer to reality and the
+    integral corrections have less bias to absorb --- particularly
+    important on front-loaded routes where corrections haven't converged.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Base configuration. `climb_effort` and `descent_confidence` are
+        overridden per category; all other parameters are inherited.
+    category_params : dict, optional
+        Mapping of difficulty category to ``(climb_effort,
+        descent_confidence)`` overrides. Categories not in the dict
+        use the base config's values.
+    min_relevant_s : float, optional
+        Relevance threshold for mountain routes. Default 120 s.
+    mountain_threshold : float, optional
+        PCS max-climb-score cutoff. Default 50.
+    """
+
+    name = "route_adaptive_split_integral_physics"
+
+    _DEFAULT_CATEGORY_PARAMS: dict[str, tuple[float, float]] = {
+        "mountains": (0.25, 0.45),
+        "hills": (0.35, 0.50),
+        "minor_hills": (0.45, 0.55),
+    }
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        category_params: dict[str, tuple[float, float]] | None = None,
+        min_relevant_s: float = 120.0,
+        mountain_threshold: float = 50.0,
+    ) -> None:
+        super().__init__(
+            cfg,
+            min_relevant_s=min_relevant_s,
+            mountain_threshold=mountain_threshold,
+        )
+        self._category_params = category_params or self._DEFAULT_CATEGORY_PARAMS
+        self._base_cfg = cfg
+        self._category_ratios: dict[str, dict[int, float]] = {}
+
+    def _ratios_for_category(self, category: str) -> dict[int, float]:
+        if category not in self._category_ratios:
+            if category in self._category_params:
+                effort, confidence = self._category_params[category]
+                import dataclasses
+
+                cat_cfg = dataclasses.replace(
+                    self._base_cfg,
+                    climb_effort=effort,
+                    descent_confidence=confidence,
+                )
+                self._category_ratios[category] = cat_cfg.realistic_ratios
+            else:
+                self._category_ratios[category] = self._ratios
+        return self._category_ratios[category]
+
+    def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
+        from godot.pcs import classify_by_max_climb
+
+        category = classify_by_max_climb(ride.gradient_segments).difficulty
+        self._ratios = self._ratios_for_category(category)
+        return super()._integrals(ride)
+
+    def predict(self, ride: Ride) -> pd.Series:
+        from godot.pcs import classify_by_max_climb
+
+        category = classify_by_max_climb(ride.gradient_segments).difficulty
+        self._ratios = self._ratios_for_category(category)
+        return super().predict(ride)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        from godot.pcs import classify_by_max_climb
+
+        category = classify_by_max_climb(ride.gradient_segments).difficulty
+        self._ratios = self._ratios_for_category(category)
+        return super().predict_current(ride)
+
+    def __str__(self) -> str:
+        return (
+            f"route-adaptive split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h prior)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"RouteAdaptiveSplitIntegralPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"category_params={self._category_params!r})"
+        )
+
+
 class EmpiricalPowerRelevantSplitEstimator(RelevantSplitIntegralPhysicsEstimator):
     """Relevant split-integral using an empirical P(g)/P(0) ratio table.
 
