@@ -339,6 +339,50 @@ corpus, route-adaptive parameters reduce mountain MAE from
 11.6 to 9.8\,\si{\minute} --- matching the empirical power curve's
 result without requiring a power meter or rider history.
 
+\subsection{Cross-ride parameter learning}
+\label{sec:cross-ride}
+
+The route-adaptive defaults above are generic: they reflect average
+rider behavior at each difficulty tier. A better approach is to let
+each rider's own correction history tune the parameters
+automatically.
+
+After each ride the final correction values $\Delta_c$ and $\Delta_d$
+are a direct measurement of how wrong the physics model was. A
+correction of $\Delta_c = 0.92$ means the model overpredicted climb
+speed by 8\,\%. This information can be fed back into the behavioral
+parameters via a simple proportional update:
+\begin{align}
+\label{eq:alpha-update}
+\alpha_{\text{new}} &\;=\; (1 - \lambda)\,\alpha_{\text{old}}
+  \;+\; \lambda\,\alpha_{\text{ride}} \cdot \Delta_c, \\
+\kappa_{\text{new}} &\;=\; (1 - \lambda)\,\kappa_{\text{old}}
+  \;+\; \lambda\,\kappa_{\text{ride}} / \Delta_d,
+\end{align}
+where $\lambda \approx 0.2$ gives a 5-ride half-life and
+$\alpha_{\text{ride}}$, $\kappa_{\text{ride}}$ are the values used on
+the just-completed ride. If $\Delta_c < 1$ (rider climbed slower than
+predicted), $\alpha$ decreases; if $\Delta_d < 1$ (rider descended
+slower than predicted), $\kappa$ increases. Over 10--15 rides the
+parameters converge to rider-specific values and the physics model
+starts each ride with corrections near~1.
+
+The entire rider state is two floating-point numbers --- $\alpha$ and
+$\kappa$ --- which can be persisted across rides with negligible
+storage. A device-side implementation does not need access to
+historical ride files: it only needs to read the final $\Delta_c$ and
+$\Delta_d$ from the ride that just ended and update two scalars. This
+makes the learning mechanism compatible with bike computers where
+extension software cannot access past ride data but can persist its
+own state from ride to ride.
+
+The update is conservative by design. A single outlier ride (a bonk,
+a race effort, a mechanical) nudges the parameters by at most
+$\lambda \approx 20\,\%$ of the correction, and the EWMA smooths it
+out over subsequent normal rides. No explicit outlier detection is
+needed: the same mechanism that makes the integrals robust
+within a ride makes the parameter update robust across rides.
+
 \subsection{What we assume}
 
 The physics model requires the following inputs:
