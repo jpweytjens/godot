@@ -3942,6 +3942,99 @@ class DurationBucketedSplitIntegralPhysicsEstimator(
         )
 
 
+class TimeLerpEstimator(DurationBucketedSplitIntegralPhysicsEstimator):
+    """Duration-bucketed physics blended with naive moving average.
+
+    Computes both a physics-based ETA (from the duration-bucketed
+    corrections) and a naive ETA (from the expanding moving average),
+    then blends them using a time-fraction weight:
+
+        f = (elapsed / (elapsed + ETA_physics)) ^ exponent
+        ETA = (1 - f) × ETA_physics + f × ETA_naive
+
+    Early in the ride (f ≈ 0): physics dominates, providing gradient
+    awareness before the moving average has converged. Late in the
+    ride (f → 1): the naive component takes over, inheriting the
+    moving average's error-cancellation property on mixed terrain.
+
+    The `exponent` controls how quickly the blend shifts from physics
+    to naive. Exponent 2 (default) keeps physics dominant until the
+    rider has covered most of the estimated time, which preserves
+    mountain-ride accuracy while helping flat/rolling rides converge
+    to the naive model's lower error floor.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    exponent : float, optional
+        Power applied to the time fraction. Default 2.0. Higher values
+        keep physics active longer.
+    short_s, long_s, min_relevant_s :
+        Inherited from `DurationBucketedSplitIntegralPhysicsEstimator`.
+    """
+
+    name = "time_lerp_duration_bucketed_physics"
+    level = 5
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        exponent: float = 2.0,
+        short_s: float = 120.0,
+        long_s: float = 480.0,
+        min_relevant_s: float = 120.0,
+    ) -> None:
+        super().__init__(
+            cfg, short_s=short_s, long_s=long_s, min_relevant_s=min_relevant_s
+        )
+        self._exponent = exponent
+
+    def predict(self, ride: Ride) -> pd.Series:
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+
+        # Physics ETA from duration-bucketed parent
+        physics_speed = super().predict(ride)
+        remaining = total_dist - distances
+        with np.errstate(divide="ignore", invalid="ignore"):
+            physics_eta = np.where(physics_speed > 0, remaining / physics_speed, 0.0)
+
+        # Naive ETA from expanding moving average
+        dd = df["delta_distance"].values
+        dt = df["delta_time"].values
+        moving = ~df["paused"].values
+        cum_dd = np.cumsum(dd * moving)
+        cum_dt = np.cumsum(dt * moving)
+        v_ma = np.where(cum_dt > 30, cum_dd / cum_dt, self._v_flat_ms)
+        naive_eta = remaining / v_ma
+
+        # Time-based blend weight
+        moving_elapsed = np.cumsum(np.where(moving, dt, 0.0))
+        safe_phys = np.where(physics_eta > 0, physics_eta, 1.0)
+        f = (moving_elapsed / (moving_elapsed + safe_phys)) ** self._exponent
+
+        blend_eta = (1 - f) * physics_eta + f * naive_eta
+        with np.errstate(divide="ignore", invalid="ignore"):
+            speed = np.where(blend_eta > 0, remaining / blend_eta, np.nan)
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"time-lerp duration-bucketed physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h, "
+            f"exp={self._exponent:.1f})"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"TimeLerpEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"exponent={self._exponent!r})"
+        )
+
+
 def _cp_segment_speeds(
     segments: list,
     v_flat_ms: float,
