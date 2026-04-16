@@ -1,20 +1,5 @@
 \documentclass[11pt,a4paper]{article}
-
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage{amsmath,amssymb}
-\usepackage{microtype}
-\usepackage[margin=2.5cm]{geometry}
-\usepackage{hyperref}
-\usepackage{siunitx}
-\usepackage{booktabs}
-\usepackage{xcolor}
-
-\hypersetup{
-    colorlinks=true,
-    linkcolor=blue!60!black,
-    urlcolor=blue!60!black,
-}
+\input{preamble}
 
 \title{A Lightweight, Self-Calibrating ETA Estimator\\
        for a Bike Computer}
@@ -652,9 +637,10 @@ close.
 \begin{table}[ht]
 \centering
 \caption{Build-up of estimator complexity. Each row adds one feature
-(marked~$\bullet$) to the row above. MAE is mean absolute ETA error in
-minutes (lower is better). The ``power'' column indicates whether
-a power meter is required.}
+to the row above. MAE is mean absolute ETA error in minutes (lower is
+better). The \emph{Behav.}\ column indicates the behavioral power
+model: ``--'' = constant power, ``param'' = parametric climb effort
+and descent decay, ``emp'' = empirical $\pi(g)$.}
 \label{tab:buildup}
 \sisetup{round-mode=places, round-precision=1}
 \begin{tabular}{@{} l ccccc S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
@@ -663,7 +649,7 @@ a power meter is required.}
 & \multicolumn{3}{c}{MAE (min)} \\
 \cmidrule(lr){2-6} \cmidrule(lr){7-9}
 Estimator
-  & {$r(g)$} & {Behav.} & {$\Delta_{c,d}$} & {Rel.} & {Power}
+  & {$r(g)$} & {Behav.} & {$\Delta$} & {Rel.} & {Power}
   & {Flat} & {Hills} & {Mtn} \\
   & & & & &
   & {$(n\!=\!226)$} & {$(n\!=\!50)$} & {$(n\!=\!14)$} \\
@@ -671,20 +657,26 @@ Estimator
 Moving average
   & {--} & {--} & {--} & {--} & {--}
   & 7.1 & 17.5 & 29.9 \\
-Physics prior
-  & {$\bullet$} & {param} & {--} & {--} & {--}
+Constant-power prior
+  & {\cmark} & {--} & {--} & {--} & {--}
+  & 8.7 & 21.3 & 31.4 \\
+Behavioural prior
+  & {\cmark} & {param} & {--} & {--} & {--}
   & 7.8 & 19.4 & 25.7 \\
+\quad + single correction
+  & {\cmark} & {param} & {global} & {--} & {--}
+  & 7.3 & 14.9 & 15.9 \\
 \quad + split correction
-  & {$\bullet$} & {param} & {$\bullet$} & {--} & {--}
+  & {\cmark} & {param} & {split} & {--} & {--}
   & 6.6 & 14.9 & 14.3 \\
 \quad + relevance filter
-  & {$\bullet$} & {param} & {$\bullet$} & {$\bullet$} & {--}
+  & {\cmark} & {param} & {split} & {\cmark} & {--}
   & 6.7 & 15.1 & 11.6 \\
 \quad + ride power curve
-  & {$\bullet$} & {emp} & {$\bullet$} & {$\bullet$} & {ride}
+  & {\cmark} & {emp} & {split} & {\cmark} & {ride}
   & 6.7 & 14.5 & 10.6 \\
 \quad + cached profile
-  & {$\bullet$} & {emp} & {$\bullet$} & {$\bullet$} & {cached}
+  & {\cmark} & {emp} & {split} & {\cmark} & {cached}
   & 6.7 & 14.7 & 9.9 \\
 \bottomrule
 \end{tabular}
@@ -693,19 +685,25 @@ Physics prior
 Several patterns stand out. The moving average is a strong baseline on
 flat rides (MAE 7.1\,min) but collapses on mountains
 (29.9\,\si{\minute}) because it cannot anticipate upcoming terrain.
-The physics prior alone actually \emph{worsens} the hill estimate
-(19.4 vs 17.5\,\si{\minute}) because its systematic bias
-(MPE~$= -15$\,\% on mountains) compounds without correction~--- the
-model has the right \emph{shape} but the wrong \emph{level}. Adding
-split integral corrections cuts the mountain error in half (14.3) by
-fixing the level independently for climbs and descents.
+The constant-power physics prior is actually \emph{worse} than the
+moving average everywhere (31.4 vs 29.9 on mountains, 8.7 vs 7.1 on
+flat): its descent predictions are so wrong that the extra gradient
+information hurts. Adding the behavioral adjustments ($\alpha$,
+$\kappa$) fixes the descent shape and recovers 5.7\,\si{\minute} on
+mountains (25.7), but without correction the model still has the right
+\emph{shape} and the wrong \emph{level} (MPE~$= -15$\,\%).
+
+A single global integral correction cuts the mountain error nearly in
+half (15.9), and splitting it into separate climb and descent channels
+gives a further 1.6\,\si{\minute} (14.3) by letting each terrain class
+converge independently.
 
 The relevance filter provides no benefit on flat rides (where it is
 correctly a no-op) but reduces mountain MAE by a further 19\,\%
-(11.6). This is the core Method~D contribution: by learning only from
-segments whose predicted traversal time exceeds 120\,\si{\second},
-the integral corrections avoid contamination from short punchy efforts
-that do not represent the rider's sustained-climb behavior.
+(11.6). This is the core contribution: by learning only from segments
+whose predicted traversal time exceeds 120\,\si{\second}, the integral
+corrections avoid contamination from short punchy efforts that do not
+represent the rider's sustained-climb behavior.
 
 The power-curve rows show the additional benefit when a power meter is
 available. A per-ride empirical $\pi(g)$ curve, trust-ramped against
@@ -742,5 +740,80 @@ window to dominate minor within-ride variations. For the rider's own
 repeated rides this assumption holds comfortably; for rides with
 violent mid-ride state changes (bonking, severe weather shifts) the
 method's accuracy degrades gracefully rather than catastrophically.
+
+\appendix
+
+\section{Full metrics by route difficulty}
+\label{app:metrics}
+
+Table~\ref{tab:full-flat}--\ref{tab:full-mtn} report the complete
+metric set for each estimator variant, partitioned by PCS-inspired
+route difficulty. MAE and RMSE are in minutes; MPE and MAPE are
+percentages of actual remaining time; Settle is the moving time in
+minutes until the ETA prediction stabilises within $\pm$5\,\% of the
+final value.
+
+\begin{table}[ht]
+\centering
+\caption{Full metrics --- flat rides ($n = 226$).}
+\label{tab:full-flat}
+\sisetup{round-mode=places, round-precision=1}
+\begin{tabular}{@{} l S[table-format=1.1] S[table-format=1.1] S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
+\toprule
+Estimator & {MAE} & {RMSE} & {MPE\,\%} & {MAPE\,\%} & {Settle} \\
+\midrule
+Moving average    & 7.1  & 8.7  & 0.1   & 9.2  & 25.4 \\
+Constant-power    & 8.7  & 6.7  & -8.8  & 11.5 & 60.1 \\
+Behavioural prior & 7.8  & 5.9  & -5.0  & 9.8  & 52.4 \\
++ single corr.    & 7.3  & 8.3  & -1.3  & 9.7  & 26.1 \\
++ split corr.     & 6.6  & 7.5  & -1.8  & 8.7  & 21.9 \\
++ relevance       & 6.7  & 7.6  & -0.5  & 8.6  & 24.9 \\
++ ride power      & 6.7  & 7.6  & -0.6  & 8.5  & 25.0 \\
++ cached profile  & 6.7  & 7.6  & -0.7  & 8.4  & 24.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Full metrics --- hilly rides ($n = 50$).}
+\label{tab:full-hills}
+\sisetup{round-mode=places, round-precision=1}
+\begin{tabular}{@{} l S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] S[table-format=1.1] S[table-format=3.1] @{}}
+\toprule
+Estimator & {MAE} & {RMSE} & {MPE\,\%} & {MAPE\,\%} & {Settle} \\
+\midrule
+Moving average    & 17.5 & 15.0 & 1.5   & 8.8  & 54.9  \\
+Constant-power    & 21.3 & 15.4 & 0.4   & 10.3 & 147.8 \\
+Behavioural prior & 19.4 & 12.4 & -6.4  & 8.9  & 138.8 \\
++ single corr.    & 14.9 & 13.1 & -1.2  & 7.7  & 55.2  \\
++ split corr.     & 14.9 & 12.3 & -0.9  & 7.8  & 64.2  \\
++ relevance       & 15.1 & 11.9 & 2.0   & 8.1  & 56.7  \\
++ ride power      & 14.5 & 11.8 & 1.9   & 7.2  & 53.4  \\
++ cached profile  & 14.7 & 12.1 & 1.5   & 7.4  & 57.5  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Full metrics --- mountain rides ($n = 14$).}
+\label{tab:full-mtn}
+\sisetup{round-mode=places, round-precision=1}
+\begin{tabular}{@{} l S[table-format=2.1] S[table-format=2.1] S[table-format=3.1] S[table-format=2.1] S[table-format=3.1] @{}}
+\toprule
+Estimator & {MAE} & {RMSE} & {MPE\,\%} & {MAPE\,\%} & {Settle} \\
+\midrule
+Moving average    & 29.9 & 36.0 & 2.2    & 16.0 & 33.9  \\
+Constant-power    & 31.4 & 31.2 & 14.6   & 17.3 & 196.4 \\
+Behavioural prior & 25.7 & 31.5 & -15.2  & 15.2 & 211.2 \\
++ single corr.    & 15.9 & 18.4 & 2.6    & 8.7  & 23.3  \\
++ split corr.     & 14.3 & 18.9 & 0.3    & 7.7  & 14.5  \\
++ relevance       & 11.6 & 15.5 & -0.6   & 6.1  & 26.7  \\
++ ride power      & 10.6 & 13.9 & -4.3   & 7.8  & 26.4  \\
++ cached profile  & 9.9  & 14.1 & -3.2   & 6.1  & 22.0  \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \end{document}

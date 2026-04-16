@@ -20,6 +20,8 @@ from godot.config import RideConfig
 from godot.estimators import (
     AvgSpeedEstimator,
     EmpiricalPowerRelevantSplitEstimator,
+    IntegralPhysicsEstimator,
+    PhysicsGradientPriorEstimator,
     RealisticPhysicsEstimator,
     RelevantCalibratedSplitPhysicsEstimator,
     RelevantSplitIntegralPhysicsEstimator,
@@ -262,7 +264,9 @@ def main() -> None:
     for v_flat_kmh in args.v_flat_priors:
         cfg = RideConfig(v_flat_kmh=v_flat_kmh)
         tag = f"v={v_flat_kmh:.0f}"
+        all_variants.append(("ConstPow", tag, PhysicsGradientPriorEstimator(cfg)))
         all_variants.append(("PhysPrior", tag, RealisticPhysicsEstimator(cfg)))
+        all_variants.append(("SingleInt", tag, IntegralPhysicsEstimator(cfg)))
         all_variants.append(("Split", tag, SplitIntegralPhysicsEstimator(cfg)))
         for t in args.thresholds:
             all_variants.append(

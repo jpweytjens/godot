@@ -1,0 +1,30 @@
+% -- Fonts (requires lualatex or xelatex) --
+\usepackage[sfdefault,lining]{FiraSans}
+\usepackage[fakebold]{firamath-otf}
+\renewcommand*\oldstylenums[1]{{\firaoldstyle #1}}
+
+% -- Layout & typography --
+\usepackage{microtype}
+\usepackage[margin=2.5cm]{geometry}
+
+% -- Math --
+% amssymb is omitted: firamath-otf loads unicode-math which provides
+% all AMS symbols and conflicts with amssymb's definitions.
+\usepackage{amsmath}
+
+% -- Tables & figures --
+\usepackage{booktabs}
+\usepackage{siunitx}
+
+% -- Symbols --
+\usepackage{pifont}
+\newcommand{\cmark}{\ding{51}}
+
+% -- Colors & links --
+\usepackage{xcolor}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+}
