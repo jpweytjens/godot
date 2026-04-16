@@ -2341,6 +2341,76 @@ def very_realistic_physics_ratios(
     return ratios
 
 
+def empirical_power_ratios(
+    mass_kg: float,
+    v_flat_ms: float,
+    p_curve: dict[int, float],
+    cda: float = 0.35,
+    crr: float = 0.005,
+    rho: float = 1.225,
+    headwind_ms: float = 2.22,
+    grad_min_pct: int = -20,
+    grad_max_pct: int = 20,
+) -> dict[int, float]:
+    """Speed ratio per gradient using an empirical P(g)/P(0) curve.
+
+    Like `realistic_physics_ratios` but replaces the hand-tuned
+    `climb_effort` / `descent_confidence` parameters with a measured
+    rider power curve. For each gradient bin the solver receives
+    `P_g = P_flat * p_curve[g]` and solves the cubic for steady-state
+    speed, giving a rider-specific `r(g)` that encodes actual intent.
+
+    Parameters
+    ----------
+    mass_kg : float
+        Rider + bike mass (kg).
+    v_flat_ms : float
+        Reference flat-ground speed (m/s).
+    p_curve : dict[int, float]
+        Empirical `P(g)/P(0)` per integer gradient bin (%).
+        Bins not in the dict default to 1.0 (flat-ground power).
+    cda, crr, rho, headwind_ms : float, optional
+        Aerodynamic and environmental parameters.
+    grad_min_pct, grad_max_pct : int, optional
+        Inclusive gradient range.
+
+    Returns
+    -------
+    dict[int, float]
+        Integer gradient (%) -> speed ratio relative to `v_flat_ms`.
+    """
+    g_const = 9.81
+    k_a = 0.5 * rho * cda
+    p_flat = (
+        k_a * (v_flat_ms + headwind_ms) ** 2 * v_flat_ms
+        + crr * mass_kg * g_const * v_flat_ms
+    )
+
+    ratios: dict[int, float] = {}
+    for pct in range(grad_min_pct, grad_max_pct + 1):
+        p_ratio = p_curve.get(pct, 1.0)
+        p_g = p_flat * p_ratio
+        theta = math.atan(pct / 100)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        c3 = k_a
+        c2 = 2 * k_a * headwind_ms
+        c1 = k_a * headwind_ms**2 + mass_kg * g_const * (crr * cos_t + sin_t)
+        c0 = -p_g
+
+        if p_g <= 0 and c1 < 0:
+            disc = c2**2 - 4 * c3 * c1
+            v = (-c2 + math.sqrt(disc)) / (2 * c3) if disc >= 0 else 0.0
+        elif p_g <= 0:
+            v = 0.0
+        else:
+            roots = np.roots([c3, c2, c1, c0])
+            real_pos = [r.real for r in roots if abs(r.imag) < 1e-10 and r.real > 0]
+            v = max(real_pos) if real_pos else 0.0
+
+        ratios[pct] = v / v_flat_ms
+    return ratios
+
+
 class PhysicsGradientPriorEstimator(GradientPriorEstimator):
     """Gradient-aware ETA estimator with ratios from a constant-power model.
 
@@ -3110,6 +3180,265 @@ class RelevantSplitIntegralPhysicsEstimator(SplitIntegralPhysicsEstimator):
     def __repr__(self) -> str:
         return (
             f"RelevantSplitIntegralPhysicsEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"min_relevant_s={self._min_relevant_s!r})"
+        )
+
+
+class EmpiricalPowerRelevantSplitEstimator(RelevantSplitIntegralPhysicsEstimator):
+    """Relevant split-integral using an empirical P(g)/P(0) ratio table.
+
+    Swaps the hand-tuned `realistic_physics_ratios` for a ratio table
+    computed from a measured rider power curve via `empirical_power_ratios`.
+    The cubic is solved at `P_flat * p_curve[g]` for each gradient, giving
+    a rider-specific `r(g)` that encodes actual behavioural intent.
+
+    In production this would use a per-rider P(g)/P(0) profile cached
+    from historical rides. For backtesting, the curve is computed from
+    the same FIT corpus (train-on-test, noted in results).
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    p_curve : dict[int, float]
+        Empirical P(g)/P(0) per integer gradient bin (%).
+    min_relevant_s : float, optional
+        Segment-time threshold for relevance. Default 120 s.
+    """
+
+    name = "empirical_power_relevant_split_integral_physics"
+
+    def __init__(
+        self,
+        cfg: RideConfig,
+        p_curve: dict[int, float],
+        min_relevant_s: float = 120.0,
+    ) -> None:
+        super().__init__(cfg, min_relevant_s=min_relevant_s)
+        # Start from the realistic physics ratios (behavioural model)
+        # and override only bins where we have empirical P data.
+        base_ratios = dict(cfg.realistic_ratios)
+        empirical = empirical_power_ratios(
+            mass_kg=cfg.total_mass_kg,
+            v_flat_ms=cfg.v_flat_ms,
+            p_curve=p_curve,
+            cda=cfg.cda,
+            crr=cfg.crr,
+            rho=cfg.rho,
+            headwind_ms=cfg.headwind_ms,
+        )
+        for pct in p_curve:
+            if pct in empirical:
+                base_ratios[pct] = empirical[pct]
+        self._ratios = base_ratios
+
+    def __str__(self) -> str:
+        return (
+            f"empirical-power relevant split-integral "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h prior, "
+            f"t_min={self._min_relevant_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"EmpiricalPowerRelevantSplitEstimator("
+            f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
+            f"min_relevant_s={self._min_relevant_s!r})"
+        )
+
+
+class ForwardBinnedSplitIntegralPhysicsEstimator(RelevantSplitIntegralPhysicsEstimator):
+    """Per-gradient-bin integral corrections with forward-weighted prediction.
+
+    Instead of two scalar corrections (`c_up`, `c_dn`), this estimator
+    maintains one integral correction per 1% gradient bin. At prediction
+    time, each upcoming VW segment pulls its own bin's correction —
+    a 5% climb segment uses `c_bin[5]`, a -3% descent uses `c_bin[-3]`.
+    This lets the estimator learn that the rider's actual-vs-predicted
+    ratio at 3% is different from 8%, rather than averaging them.
+
+    When a bin has no observations at a given row, the nearest bin with
+    data is used. This provides graceful coverage: even if the rider
+    hasn't seen a 10% gradient yet, the correction from 7% (the steepest
+    observed bin) is applied rather than defaulting to 1.0.
+
+    Inherits relevance gating from `RelevantSplitIntegralPhysicsEstimator`
+    — only samples on ETA-relevant segments feed the per-bin integrals.
+
+    Parameters
+    ----------
+    cfg : RideConfig
+        Shared rider/ride configuration.
+    min_relevant_s : float, optional
+        Segment-time threshold for relevance. Default 120 s.
+    """
+
+    name = "forward_binned_split_integral_physics"
+    level = 5
+
+    def _binned_integrals(self, ride: Ride) -> dict[int, np.ndarray]:
+        """Per-gradient-bin cumulative corrections, shape {bin: (N,)}."""
+        ratios = self._ratios
+        df = ride.df
+        n = len(df)
+        gradients, _ = _row_gradients(ride)
+        grad_pct = np.clip(
+            np.floor(gradients.values * 100).astype(int),
+            min(ratios),
+            max(ratios),
+        )
+        row_ratios = np.array([ratios.get(g, 1.0) for g in grad_pct])
+
+        speed = df["speed_ms"].values
+        paused = df["paused"].values
+        dt = df["delta_time"].values
+        dd = df["delta_distance"].values
+
+        valid = (
+            ~paused
+            & (speed > 0.5)
+            & (row_ratios > 0.05)
+            & (dd > 0)
+            & self._extra_row_mask(ride)
+        )
+
+        safe_ratios = np.where(row_ratios > 0.05, row_ratios, 1.0)
+        dd_per_ratio = dd / safe_ratios
+
+        seg_bins = set(
+            int(np.clip(math.floor(s.gradient * 100), min(ratios), max(ratios)))
+            for s in ride.gradient_segments
+        )
+        all_bins = sorted(seg_bins | set(np.unique(grad_pct[valid])))
+
+        corrections: dict[int, np.ndarray] = {}
+        for g in all_bins:
+            in_bin = valid & (grad_pct == g)
+            S = np.cumsum(np.where(in_bin, dd_per_ratio, 0.0))
+            T = np.cumsum(np.where(in_bin, dt, 0.0))
+            safe_T = np.where(T > 0, T, 1.0)
+            c = np.where(T > 0, S / (self._v_flat_ms * safe_T), 0.0)
+            corrections[g] = c
+
+        return corrections
+
+    def _fill_missing_bins(
+        self,
+        corrections: dict[int, np.ndarray],
+        needed_bins: set[int],
+        n: int,
+    ) -> dict[int, np.ndarray]:
+        """For bins with no data at a given row, use the nearest bin that has."""
+        available = sorted(corrections.keys())
+        if not available:
+            return {g: np.ones(n) for g in needed_bins}
+
+        filled: dict[int, np.ndarray] = {}
+        for g in needed_bins:
+            if g in corrections:
+                c = corrections[g].copy()
+            else:
+                nearest = min(available, key=lambda a: abs(a - g))
+                c = corrections[nearest].copy()
+            # Where the bin itself has no cumulative data yet, fall back
+            # to nearest bin that does, row by row.
+            no_data = c == 0.0
+            if no_data.any() and len(available) > 1:
+                for alt_g in sorted(available, key=lambda a: abs(a - g)):
+                    if alt_g == g:
+                        continue
+                    alt_c = corrections[alt_g]
+                    fill_mask = no_data & (alt_c > 0)
+                    c[fill_mask] = alt_c[fill_mask]
+                    no_data = c == 0.0
+                    if not no_data.any():
+                        break
+            c[c == 0.0] = 1.0
+            filled[g] = c
+        return filled
+
+    def predict(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        total_dist = df["distance_m"].iloc[-1]
+        distances = df["distance_m"].values
+        n = len(df)
+
+        corrections = self._binned_integrals(ride)
+        min_bin, max_bin = min(self._ratios), max(self._ratios)
+        seg_bins = [
+            int(np.clip(math.floor(s.gradient * 100), min_bin, max_bin))
+            for s in segments
+        ]
+        needed = set(seg_bins)
+        filled = self._fill_missing_bins(corrections, needed, n)
+
+        seg_ratios = np.array([self._ratio_for(s.gradient) for s in segments])
+        base_speeds = self._v_flat_ms * seg_ratios
+
+        # Per-bin TTG: mask segments to each bin, compute TTG, divide
+        # by that bin's correction.
+        ttg = np.zeros(n)
+        for g in needed:
+            bin_mask = np.array([b == g for b in seg_bins])
+            if not bin_mask.any():
+                continue
+            masked_speeds = np.where(bin_mask, base_speeds, np.inf)
+            bin_ttg = segment_ttg_from_row(
+                distances, total_dist, segments, masked_speeds
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ttg += bin_ttg / filled[g]
+
+        speed = effective_speed_from_ttg(distances, total_dist, ttg)
+        return pd.Series(speed, index=df.index)
+
+    def predict_current(self, ride: Ride) -> pd.Series:
+        segments = ride.gradient_segments
+        df = ride.df
+        n = len(df)
+
+        corrections = self._binned_integrals(ride)
+        min_bin, max_bin = min(self._ratios), max(self._ratios)
+        needed = set(
+            int(np.clip(math.floor(s.gradient * 100), min_bin, max_bin))
+            for s in segments
+        )
+        filled = self._fill_missing_bins(corrections, needed, n)
+
+        seg_ends = np.array([s.end_distance_m for s in segments])
+        distances = df["distance_m"].values
+        idx = np.searchsorted(seg_ends, distances, side="left").clip(
+            max=len(segments) - 1
+        )
+        seg_bins = np.array(
+            [
+                int(np.clip(math.floor(s.gradient * 100), min_bin, max_bin))
+                for s in segments
+            ]
+        )
+        row_bins = seg_bins[idx]
+        row_corrections = np.array(
+            [filled.get(int(row_bins[i]), np.ones(n))[i] for i in range(n)]
+        )
+        speed = (
+            self._v_flat_ms
+            * np.array([self._ratio_for(segments[idx[i]].gradient) for i in range(n)])
+            * row_corrections
+        )
+        return pd.Series(speed, index=df.index)
+
+    def __str__(self) -> str:
+        return (
+            f"forward-binned split-integral physics "
+            f"({ms_to_kmh(self._v_flat_ms):.1f} km/h prior, "
+            f"t_min={self._min_relevant_s:.0f}s)"
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"ForwardBinnedSplitIntegralPhysicsEstimator("
             f"v_flat_kmh={ms_to_kmh(self._v_flat_ms)!r}, "
             f"min_relevant_s={self._min_relevant_s!r})"
         )

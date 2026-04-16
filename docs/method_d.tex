@@ -1,0 +1,665 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{microtype}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{hyperref}
+\usepackage{siunitx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+}
+
+\title{A Lightweight, Self-Calibrating ETA Estimator\\
+       for a Bike Computer}
+\author{Godot Cycling ETA -- Method D}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+We describe a method for estimating remaining ride time on a GPS-capable
+bike computer that requires only the route and the rider's total
+weight as device-level inputs. Aerodynamics, rolling resistance, and
+wind are treated as fixed assumptions, and the rider's flat-ground
+cruising speed is measured from the first few minutes of the ride
+itself. The physical model is a constant-power force balance that we
+solve in closed form per gradient bin to produce a speed-ratio curve.
+A short behavioral adjustment layer makes the curve match what real
+riders actually do on climbs and descents. The route is decimated by
+Visvalingam--Whyatt simplification into constant-gradient segments;
+time-to-go is then a dot product between a per-gradient speed table
+and a histogram of remaining route length at each gradient. A pair of
+cumulative integral corrections, one for climbs and one for descents,
+absorbs any steady-state bias that the physics model cannot predict
+a priori. The result is an estimator with a small fixed set of inputs,
+a tiny online state, and a self-calibration mechanism that converges
+within the first few minutes of any ride.
+\end{abstract}
+
+\section{Problem statement}
+
+On a device like a Karoo Hammerhead the inputs we can rely on are:
+the route (a sequence of GPS coordinates with elevation), the rider's
+total weight, and the 1\,\si{\hertz} stream of GPS samples arriving
+as the ride unfolds. Everything else~--- power meter data, heart
+rate, cadence, temperature, wind conditions, fitness history~--- may
+or may not be present, and we want the estimator to be useful even
+when it is not.
+
+The ride-time prediction problem is then: given the route geometry
+ahead, the weight and (implicitly) recent pace of the rider, predict
+the remaining time to the finish as accurately as possible at every
+1\,\si{\hertz} tick. A useful prediction is one whose error is
+\emph{small and stable}: the rider wants a number they can trust in
+planning decisions (when to eat, when to push, when to turn around)
+rather than one that swings wildly from minute to minute.
+
+We describe a method that achieves this with a physics model of
+modest complexity, a compact route representation, and a single
+observation-based correction mechanism. We call it Method~D within
+the broader Godot project, where it was identified as the best
+clean-architecture alternative to the static-prior baseline across a
+corpus of 311 historical rides.
+
+\section{Physics model: from power to speed}
+
+\subsection{Force balance on a slope}
+
+For a cyclist travelling at steady-state speed $v$ on a road of slope
+angle $\theta$, balancing power output against resistive forces gives
+\begin{equation}
+\label{eq:force-balance}
+P(\theta) \;=\; \tfrac{1}{2}\,\rho\,C_d A\,(v + v_w)^2\,v
+              \;+\; C_{rr}\,m\,g\,v\cos\theta
+              \;+\; m\,g\,v\sin\theta,
+\end{equation}
+where $P$ is the rider's power output at that gradient, $\rho$ is air
+density, $C_dA$ is the aerodynamic drag-area coefficient, $C_{rr}$ is
+the rolling resistance coefficient, $m$ is the total rider-plus-bike
+mass, $g$ is gravitational acceleration, and $v_w$ is the effective
+headwind component along the direction of travel. The three terms on
+the right are aerodynamic drag, rolling friction, and gravitational
+work against the slope, respectively.
+
+On flat ground ($\theta = 0$) we can invert
+\eqref{eq:force-balance} to get the rider's \emph{flat-ground power
+budget}
+\begin{equation}
+\label{eq:p-flat}
+P_{\text{flat}} \;=\; \tfrac{1}{2}\,\rho\,C_d A\,(v_{\text{flat}} + v_w)^2\,v_{\text{flat}}
+                 \;+\; C_{rr}\,m\,g\,v_{\text{flat}},
+\end{equation}
+given a reference flat-ground cruising speed $v_{\text{flat}}$.
+Equation~\eqref{eq:p-flat} is the link between a quantity the device
+can \emph{observe} ($v_{\text{flat}}$) and the latent quantity the
+physics model needs ($P_{\text{flat}}$).
+
+\subsection{Solving for $v$ at each gradient}
+
+Taken as a function of $v$, equation~\eqref{eq:force-balance} is a
+cubic, so for a given power budget $P$ and gradient $\theta$ it has a
+closed-form real root via Cardano's formula. The root gives the speed
+the rider would sustain at that gradient under the assumption that
+their power output equals $P$. Iterating this over a grid of integer
+percent gradients $g \in \{g_{\min}, \dots, g_{\max}\}$ produces a
+\emph{speed-ratio table}
+\begin{equation}
+r(g) \;=\; \frac{v(g)}{v_{\text{flat}}},
+\qquad r(0) = 1,
+\end{equation}
+whose shape encodes how much slower (or faster) the rider moves at
+each gradient relative to their flat-ground pace. This is the only
+route-independent knowledge the estimator needs about the rider.
+
+\subsection{Behavioral adjustments}
+
+A constant-power assumption is physically honest but biologically
+wrong: real riders do not put out identical wattage on a 10\,\% climb
+and on a flat road. They push harder on climbs up to a physiological
+ceiling and ease off on descents where gravity is doing most of the
+work. We introduce two small lumped parameters to capture this.
+
+Let $P_{\max}$ be the rider's ceiling (taken as a small multiple of
+$P_{\text{flat}}$, or derived from an FTP estimate if one is
+available). On climb gradients we replace $P$ in
+\eqref{eq:force-balance} with a gradient-scaled power budget
+\begin{equation}
+\label{eq:climb-power}
+P_{\text{climb}}(g) \;=\; \min\!\big(P_{\max},\;
+  P_{\text{flat}} \cdot (1 + \alpha \cdot g)\big),
+\qquad g > 0,
+\end{equation}
+where $\alpha$ is the \emph{climb effort} parameter that controls how
+aggressively the rider ramps into their ceiling. On descents we apply
+an exponential decay
+\begin{equation}
+\label{eq:descent-power}
+P_{\text{descent}}(g) \;=\; P_{\text{flat}} \cdot \exp(-\kappa \cdot |g|),
+\qquad g < 0,
+\end{equation}
+modelling the fact that riders progressively reduce effort as the
+slope does more of the work and cornering and confidence become the
+limiting factors.
+
+With these substitutions, the cubic in \eqref{eq:force-balance} is
+solved once per gradient bin, producing a ratio table $r(g)$ whose
+shape reflects both physics and rider behavior. Empirically, this
+shape is much more stable across operating points than the pure
+constant-power version: a 2$\times$ change in $v_{\text{flat}}$
+produces roughly 1.2--1.3$\times$ shape distortion in the behavioral
+table versus 2.4--2.7$\times$ in the constant-power table. The
+behavioral model is therefore less sensitive to $v_{\text{flat}}$
+misspecification during the warmup phase described below.
+
+\subsection{What we assume}
+
+The physics model requires the following inputs:
+\begin{itemize}
+  \item The total rider-plus-bike mass $m$ (measured).
+  \item The flat-ground cruising speed $v_{\text{flat}}$ (measured from
+        the ride; see Section~\ref{sec:warmup}).
+  \item Fixed assumed values for $\rho$, $C_dA$, $C_{rr}$,
+        $\alpha$, $\kappa$, $P_{\max}/P_{\text{flat}}$ and effective
+        headwind $v_w$.
+\end{itemize}
+
+The fixed assumptions deserve a brief comment. We do \emph{not} claim
+these values are accurate for any particular rider: a given rider's
+$C_dA$ may be off by $\pm 20\,\%$ from the default; the rolling
+resistance of their tires may differ; the wind on any given day is
+entirely unmodeled. We only claim that these values are approximately
+correct, that deviations from them are slowly varying and similar
+across gradient bins, and that the integral correction described in
+Section~\ref{sec:integral} will absorb the scale of whatever the
+fixed assumptions got wrong. The physics model does not need to be
+correct in absolute terms. It only needs to produce a
+\emph{shape-correct} ratio table~--- one where the \emph{relative}
+difficulty of a 10\,\% climb versus a 5\,\% climb is approximately
+right~--- because shape errors are what the integral correction is
+\emph{unable} to fix.
+
+\section{Route representation}
+\label{sec:route}
+
+\subsection{Visvalingam--Whyatt decimation}
+
+A raw GPS route is a noisy polyline with many thousands of vertices,
+each contributing a slightly different gradient. For ETA purposes we
+do not care about the fine detail: we want a compact set of
+constant-gradient segments that captures the essential character of
+the route. We use the Visvalingam--Whyatt (VW) line simplification
+algorithm, which iteratively removes the vertex whose triangle of
+elimination has the smallest area, until a minimum-area threshold
+(typically a few hundred square meters of horizontal$\times$vertical
+tolerance) is reached. The result is a polyline with $S$ vertices and
+$S - 1$ segments, each having a constant gradient.
+
+For a typical 5\,\si{\hour} rolling ride, VW produces on the order of
+$S \approx 100$--$200$ segments; a flat commute gives fewer; an Alpine
+climb more. The set of segments is the only route-dependent data the
+estimator needs at runtime.
+
+\subsection{From segments to a gradient histogram}
+
+Given the segment list $\{(L_j, g_j)\}_{j=1}^{S}$, where $L_j$ is the
+segment length in meters and $g_j$ is its gradient in percent,
+we form a histogram over gradient bins
+\begin{equation}
+\label{eq:hist}
+H(g) \;=\; \sum_{j\,:\,\text{bin}(g_j) = g} L_j,
+\end{equation}
+which records the total route length at each gradient bin. A 50\,\si{\km}
+ride might have $H(0) = \SI{32}{\km}$, $H(3) = \SI{5}{\km}$,
+$H(5) = \SI{3}{\km}$, and so on for the gradients that appear in the
+route. The histogram has at most $|g_{\max} - g_{\min}| + 1 \approx 40$
+entries and compresses the route geometry into a tiny fixed-size
+data structure.
+
+\section{Time-to-go as a dot product}
+\label{sec:dotproduct}
+
+The remaining time from any point on the route to the end, assuming
+the rider is moving at $v_{\text{flat}} \cdot r(g)$ on every segment,
+is
+\begin{equation}
+\label{eq:ttg}
+\text{TTG} \;=\; \sum_{j \text{ ahead}} \frac{L_j}{v_{\text{flat}} \cdot r(g_j)}.
+\end{equation}
+Regrouping this sum by gradient bin,
+\begin{equation}
+\label{eq:ttg-binned}
+\text{TTG} \;=\; \frac{1}{v_{\text{flat}}} \sum_{g} \frac{H^{\ast}(g)}{r(g)}
+\;=\; \frac{1}{v_{\text{flat}}} \,\mathbf{H}^{\ast} \cdot \mathbf{r}^{-1},
+\end{equation}
+where $H^{\ast}(g)$ is the histogram over only the part of the route
+that is still ahead of the rider, and $\mathbf{r}^{-1}$ is the
+vector $(1/r(g))_g$. Equation~\eqref{eq:ttg-binned} is a dot product
+between two small vectors of fixed length.
+
+The representation is incremental. As the rider advances by a
+distance $\Delta d$ in the current 1\,\si{\hertz} tick,
+$H^{\ast}(g_{\text{current}})$ is decremented by $\Delta d$, and the
+dot product is re-evaluated in constant time. When $\Delta d$ spans a
+VW segment boundary (which happens rarely at typical cycling speeds
+and short tick intervals) the decrement is split across the bins of
+the segments involved. Route state ($\mathbf{H}^{\ast}$) and rider
+state ($\mathbf{r}^{-1}, v_{\text{flat}}$) are fully decoupled:
+updating one does not require touching the other.
+
+\section{Cumulative integral correction}
+\label{sec:integral}
+
+The physics model gives a shape for $r(g)$; it does not give an
+absolute pace that matches reality for any specific rider. Even with
+correct $v_{\text{flat}}$, a rider may climb harder than the model
+predicts (rider is better than average on hills), descend more
+conservatively (rider does not like cornering at speed), or simply
+run into a sustained headwind the model has no way to know about.
+
+We handle this with two scalar correction factors $\Delta_c$ and
+$\Delta_d$, one for climb rows and one for descent rows, each a ratio
+of cumulative predicted time to cumulative actual time over the ride
+so far:
+\begin{align}
+\Delta_c(t)
+&\;=\;
+\frac{\sum_{i \in \text{climb rows},\; \tau_i \le t} dd_i / \big(v_{\text{flat}} \cdot r(g_i)\big)}
+     {\sum_{i \in \text{climb rows},\; \tau_i \le t} dt_i}, \\[1ex]
+\Delta_d(t)
+&\;=\;
+\frac{\sum_{i \in \text{descent rows},\; \tau_i \le t} dd_i / \big(v_{\text{flat}} \cdot r(g_i)\big)}
+     {\sum_{i \in \text{descent rows},\; \tau_i \le t} dt_i}.
+\end{align}
+A value of $\Delta_c = 1$ means the climb predictions match reality.
+$\Delta_c < 1$ means the rider climbs faster than predicted (the
+cumulative predicted time is less than the cumulative actual time).
+$\Delta_c > 1$ means the rider climbs slower than predicted.
+
+At query time, the ETA formula splits the TTG into its climb and
+descent contributions and divides each by the corresponding integral:
+\begin{equation}
+\label{eq:eta}
+\text{ETA}(t) \;=\;
+ \frac{1}{v_{\text{flat}}} \Big[\frac{1}{\Delta_c(t)}\,\mathbf{H}^{\ast}_c \cdot \mathbf{r}_c^{-1}
+                   \;+\; \frac{1}{\Delta_d(t)}\,\mathbf{H}^{\ast}_d \cdot \mathbf{r}_d^{-1}\Big],
+\end{equation}
+where the subscripts $c$ and $d$ denote the climb-only and
+descent-only slices of the histogram and the ratio vector. The two
+integrals act as scale corrections that absorb any steady bias between
+what the physics model predicts and what the rider actually achieves,
+independently for climbs and descents.
+
+Algebraically, $\Delta_c \cdot v_{\text{flat}}$ is the back-derived
+$v_{\text{flat}}$ inferred from climb rows alone: the rider's actual
+pace on climbs, expressed in flat-equivalent units via the ratio
+table. The same for $\Delta_d$ and descent rows. The ETA formula can
+be read as ``weight the remaining route length by its gradient shape,
+then scale by the rider's observed pace on that kind of terrain so
+far.'' The $v_{\text{flat}}$ prior drops out algebraically whenever
+both the histogram and the integral scale with it in the same way,
+which is one reason the method is robust to a mildly wrong flat-ground
+prior.
+
+\section{Warmup and one-shot recalibration}
+\label{sec:warmup}
+
+The integral correction above is well-defined once the ride has
+produced at least a few climb and descent observations. During the
+first few minutes, though, the ratio table is built from a
+\emph{guess} at $v_{\text{flat}}$~--- whatever the config supplies or
+the last ride's value. If the guess is badly wrong, the ratio table's
+shape is also off, and the integrals will spend the first half of the
+ride compensating for a miscalibrated physics model rather than
+correcting for genuine rider behavior.
+
+Method~D addresses this with a single-shot recalibration step. For
+the first
+\begin{equation}
+\tau_{\text{warmup}} \;=\;
+\mathrm{clip}\!\big(\phi \cdot \hat{T}_{\text{total}},\;
+  \tau_{\min},\; \tau_{\max}\big)
+\end{equation}
+seconds of moving time (a fixed fraction $\phi \approx 0.10$ of the
+estimated total ride time $\hat{T}_{\text{total}}$, clipped into
+$[\SI{3}{\minute}, \SI{10}{\minute}]$), the estimator does not yet
+accumulate integrals. Instead, it runs a \emph{prior-free}
+$v_{\text{flat}}$ observer in parallel: a running mean of
+$v_i / r(g_i)$ over all valid moving rows, which back-derives the
+rider's flat-equivalent pace by inverting the ratio table. This
+observer is unbiased in expectation (it does not depend on the guess
+at $v_{\text{flat}}$), but it is noisy with few samples and needs
+some data to settle.
+
+At the warmup boundary, the estimator reads off the current value
+$\hat{v}_{\text{flat}}$ from the prior-free observer and \emph{rebuilds
+the ratio table} at that new operating point, using
+equation~\eqref{eq:force-balance} with the updated $v_{\text{flat}}$.
+From then on the rebuilt table is used for all further predictions,
+and the climb/descent integrals begin accumulating against the
+rebuilt prediction. This is where the ``D'' comes from in the
+variant's internal name: compared to the static-prior baseline, the
+differentiation is \emph{one shot of calibration up front}.
+
+After the warmup, $v_{\text{flat}}$ is frozen and the integrals do
+the rest of the work. The frozen value is not revisited. This is a
+deliberate choice: the two integrals have infinite memory (they are
+cumulative, not windowed), and letting $v_{\text{flat}}$ drift on top
+of them would introduce a second feedback loop whose dynamics would
+interact in hard-to-predict ways. Freezing $v_{\text{flat}}$ post-
+warmup gives the integrals a stable target to converge to, and the
+integrals handle all within-ride variation from there.
+
+Empirically, this single recalibration is enough to make the
+estimator robust to a $\pm$30\,\% error in the initial
+$v_{\text{flat}}$ guess: when the baseline's MAE swings by
+$\sim$1.2\,\si{\minute} as we move the prior from \SI{20}{\km\per\hour}
+to \SI{40}{\km\per\hour}, Method~D's MAE swings by
+$\sim$0.2\,\si{\minute}.
+
+\section{Relevant-segment filtering}
+\label{sec:relevant}
+
+The integral corrections $\Delta_c$ and $\Delta_d$ absorb
+\emph{average} bias across all climb and descent observations,
+respectively. On a ride that mixes short punchy walls with long
+sustained climbs, the integral learns a weighted average of two
+different regimes: a rider who hammers a 200\,\si{\metre} muurke at
+double their flat-ground power, and the same rider pacing a
+10\,\si{\km} climb at 1.3$\times$. Because the integral is
+cumulative, the muurke's contribution is proportional to its
+duration---typically 1--2\,\si{\minute}---and is eventually washed
+out by longer observations. But if the muurke appears early in the
+ride and the first long climb does not come for another hour, the
+integral carries a biased $\Delta_c$ across that entire gap.
+
+We address this by \emph{pre-classifying} VW segments at ride start
+into relevant and non-relevant. A segment is \emph{relevant} when its
+predicted traversal time at the prior $v_\text{flat}$ exceeds a
+threshold $\tau_\text{min}$ (default 120\,\si{\second}):
+\begin{equation}
+\label{eq:relevant}
+\text{relevant}(j)
+\;\iff\;
+\frac{L_j}{v_\text{flat} \cdot r(g_j)}
+\;>\; \tau_\text{min}.
+\end{equation}
+This classification uses only the route geometry and the prior
+$v_\text{flat}$; it is computed once and fixed for the ride.
+
+The integral corrections then accumulate only over rows whose
+containing VW segment is relevant:
+\begin{equation}
+\Delta_c(t) \;=\;
+\frac{\displaystyle\sum_{\substack{i \in \text{climb},\;\tau_i \le t \\ \text{relevant}(j_i)}}
+  dd_i / \bigl(v_\text{flat} \cdot r(g_i)\bigr)}
+     {\displaystyle\sum_{\substack{i \in \text{climb},\;\tau_i \le t \\ \text{relevant}(j_i)}} dt_i},
+\end{equation}
+and analogously for $\Delta_d$. Non-relevant segments are still
+predicted---they contribute to the TTG via
+equation~\eqref{eq:ttg}---but their samples do not feed back into
+the correction state. On a ride with no relevant segments (a typical
+flat Belgian day) the integrals simply stay at~1 and the estimator
+degenerates to the uncorrected physics model, which is the right
+behavior when there is nothing material to learn from.
+
+On a corpus of 290~rides partitioned by PCS-inspired climb
+difficulty, this filter reduces MAE on mountain rides by
+$\sim$19\,\% (from 14.3 to 11.6\,\si{\minute}) while leaving flat
+rides unchanged. The threshold $\tau_\text{min} = 120$\,\si{\second}
+was selected by a sweep over $\{60, 120, 180, 300, 600\}$; it
+corresponds to the approximate boundary between a punchy wall the
+rider can sustain above threshold and a paced effort where riding
+behavior dominates sprint dynamics.
+
+
+\section{Power-informed behavioral model}
+\label{sec:power}
+
+\subsection{Replacing the parametric model with measurement}
+
+The behavioral adjustments in equations~\eqref{eq:climb-power} and
+\eqref{eq:descent-power} introduce two free parameters ($\alpha$ and
+$\kappa$) that control how power varies with gradient. Their values
+are hand-tuned to a generic rider. When a power meter is available,
+we can replace the parametric family entirely with a measured
+\emph{power curve}
+\begin{equation}
+\label{eq:pi}
+\pi(g) \;=\; \frac{P(g)}{P_\text{flat}},
+\qquad \pi(0) = 1,
+\end{equation}
+computed as the median power ratio per integer gradient bin, either
+from the rider's historical rides or from the current ride as
+observations accumulate.
+
+The ratio table $r(g)$ is then produced by the same cubic solver
+as before, but with the behavioral power budget at each gradient
+replaced by the empirical one:
+\begin{equation}
+\label{eq:r-empirical}
+r(g) \;=\; \frac{v(g)}{v_\text{flat}},
+\qquad\text{where } v(g) \text{ solves~\eqref{eq:force-balance} at }
+P = P_\text{flat} \cdot \pi(g).
+\end{equation}
+The physics (drag, rolling resistance, gravity, headwind) is
+unchanged; only the \emph{rider intent} input to the cubic is swapped
+from a parametric assumption to a lookup. Gradient bins for which
+$\pi(g)$ has not been observed fall back to the parametric behavioral
+model, so the empirical curve strictly refines the physics rather
+than replacing it.
+
+\subsection{Decomposition: physics residual and behavioral signal}
+
+With measured power on every sample, the observed speed ratio
+decomposes as
+\begin{equation}
+\label{eq:decomposition}
+\underbrace{\frac{v_\text{obs}}{v_\text{flat}}}_{\text{observed ratio}}
+\;=\;
+\underbrace{\frac{v_\text{obs}}{v_\text{phys}(P_\text{obs}, g)}}_{\text{physics residual}}
+\;\cdot\;
+\underbrace{\frac{v_\text{phys}(P_\text{obs}, g)}{v_\text{flat}}}_{\text{ratio at measured power}},
+\end{equation}
+where $v_\text{phys}(P, g)$ is the steady-state speed from the cubic
+at the \emph{measured} power $P_\text{obs}$. The first factor is a
+pure physics residual (CdA, $C_{rr}$, wind errors); the second
+encodes rider intent via the cubic. Empirically, the physics residual
+is approximately flat across climb gradients ($\sim$0.93--0.96),
+confirming that rider intent---not physics error---is the dominant
+source of shape mismatch in the ratio table. On descents the residual
+drops sharply (to $\sim$0.66 at $-8$\,\%) reflecting braking and
+cornering, which is a speed-level phenomenon that the power channel
+cannot resolve.
+
+This decomposition motivates the asymmetric architecture: on climbs,
+the empirical power curve $\pi(g)$ captures rider intent and the
+integral correction $\Delta_c$ absorbs the small, flat physics
+residual. On descents, $\pi(g)$ is less useful (power does not
+predict speed well when braking dominates), so $\Delta_d$ carries
+the full correction as before.
+
+\subsection{Three tiers of availability}
+\label{sec:power-tiers}
+
+The estimator operates in three modes depending on what data is
+available:
+\begin{enumerate}
+\item \textbf{No power meter.}
+  The parametric behavioral model
+  (equations~\ref{eq:climb-power}--\ref{eq:descent-power}) provides
+  $r(g)$. This is the default and requires no rider history. The
+  relevant-segment filter (Section~\ref{sec:relevant}) and the
+  split integral corrections provide self-calibration from speed
+  observations alone.
+\item \textbf{Power meter, no history.}
+  The empirical $\pi(g)$ is estimated from the current ride as
+  gradient bins accumulate samples ($\ge$30 per bin). Bins without
+  enough data fall back to the parametric model. On hilly rides this
+  produces a usable curve within the first 30--60\,\si{\minute}; on
+  mountain rides with sparse steep-gradient bins the fallback
+  dominates and the benefit is smaller.
+\item \textbf{Power meter with rider history.}
+  A cached $\pi(g)$ profile, computed from the rider's historical
+  rides, is loaded at ride start. All bins are populated and the
+  ratio table is rider-specific from the first prediction. The
+  current ride's power observations can further refine the profile
+  via a trust-weighted blend.
+\end{enumerate}
+
+On a corpus of 290~rides, the cached profile reduces mountain-ride
+MAE by 30\,\% versus the unfiltered baseline (from 14.3 to
+9.9\,\si{\minute}) and the per-ride mode by 25\,\% (to
+10.7\,\si{\minute}). On flat rides the improvement is smaller but
+consistent ($\sim$3\,\% MAPE reduction), confirming that the
+empirical curve is a strict improvement over the parametric model
+even on terrain where gradient-awareness matters least.
+
+
+\section{What we do not model}
+
+It is worth being explicit about what the estimator deliberately
+leaves out, and why.
+
+\paragraph{Fatigue.} We do not model progressive decline in rider
+power output as the ride proceeds. If the rider slows down in the
+second half of the ride because they are tired, the integrals will
+drift smoothly toward the new equilibrium over the following
+$\sim$30\,\si{\minute} (set by the rate at which new observations
+accumulate relative to old ones in the expanding-mean integral).
+For rides where fatigue is mild, this drift is accurate enough. For
+rides where fatigue is extreme (ultra-distance events where the rider
+bonks) the integral adapts more slowly than reality and the estimator
+will underpredict the remaining time during the transition.
+
+\paragraph{Wind.} The effective headwind $v_w$ in
+equation~\eqref{eq:force-balance} is a fixed assumption. If the real
+wind differs from the assumption, the entire ratio table is
+distorted, but predominantly uniformly: a tailwind shifts all ratios
+up, a headwind shifts them down. The climb/descent integrals absorb
+this as a scale error without needing to know why it happened.
+
+\paragraph{Temperature, humidity, altitude.} These affect air density
+$\rho$ slightly and the rider's power output via physiology. Both
+effects are second-order relative to gradient and are treated as
+constants.
+
+\paragraph{Group dynamics.} Drafting in a peloton reduces aerodynamic
+drag by a factor that depends on position in the group and the
+group's speed, which is a function of minute-by-minute tactical
+decisions. We do not model this. If the rider joins a fast group,
+their effective pace increases in a way the climb/descent integrals
+will eventually catch up with, but probably not before the benefit
+evaporates.
+
+\paragraph{Traffic and stops.} These are handled upstream of the
+estimator: the GPS track is pre-processed to flag paused rows, and the
+estimator's integrals and TTG computation skip them. The wall-clock
+ETA is adjusted separately to reflect the time spent paused so far.
+
+\paragraph{Mid-ride state changes.} We do not attempt to detect
+abrupt shifts in rider physiology or conditions during the ride. We
+experimented with several mechanisms (divergence monitoring, pause-
+triggered resets, change-point detection) and found empirically that
+none of them produced reliable gains on a corpus of 311 real rides.
+The integrals' own drift rate is sufficient to catch most
+state-change effects over the typical timescale of a ride, and
+attempts to detect state changes explicitly either produced no
+improvement or introduced spurious resets that hurt more than they
+helped.
+
+\section{Why the unmodeled effects are tolerable}
+
+The estimator's central claim is that, as long as ride duration is
+sufficiently long relative to the integral correction's effective
+time constant, the cumulative integrals will dominate any steady
+bias introduced by the fixed physics assumptions. We can make this
+precise as follows.
+
+Suppose the physics model underestimates rider pace by a factor of
+$(1 + \epsilon)$, uniformly across all gradients, for reasons we do
+not know and cannot correct a priori. After $n$ moving observations
+have accumulated in the integrals, both $\Delta_c$ and $\Delta_d$
+will have converged to values that absorb this factor, and the ETA
+formula \eqref{eq:eta} will scale by the same $(1 + \epsilon)$ to
+match reality. The bias is gone. The only lingering error is on the
+rows \emph{before} the integrals have enough samples to converge~---
+which is the warmup period we already handle with the one-shot
+recalibration.
+
+For non-uniform bias~--- say the physics model is right about climbs
+but wrong about descents, or vice versa~--- the split into climb and
+descent integrals gives each of the two terrain classes its own
+correction. The only bias the method cannot absorb is a bias that
+varies non-uniformly \emph{within} the climb class (rider climbs 10\%
+harder than predicted on 5\,\% gradients but only 5\% harder on
+10\,\% gradients) or within the descent class. Such biases would
+correspond to genuine shape errors in the ratio table, and the
+behavioral tweaks in Section~2 are what the method offers as a
+mitigation. They are not perfect, but across our corpus the residual
+shape error within a terrain class is small enough that the integrals
+do most of the work.
+
+The upshot is that, for rides lasting at least $\sim$30 minutes and
+for rider-environment mismatches that are steady over the ride,
+Method~D converges on accurate predictions whose error is dominated
+by the initial warmup and bounded by the quality of the behavioral
+ratio table. For the rider's own repeated rides on their usual routes,
+this error is typically around $\pm$6\,\si{\minute} of MAE on a 5-hour
+ride, or roughly 2\,\%.
+
+\section{State size and online cost}
+
+For a device-side implementation, the estimator maintains:
+\begin{itemize}
+  \item The gradient histogram $\mathbf{H}^{\ast}$: one float per
+        bin that appears in the route. Typically 20--40 floats.
+  \item The inverse-ratio vector $\mathbf{r}^{-1}$: one float per
+        gradient bin. Same size.
+  \item The current segment index and distance-into-segment for the
+        incremental update. Two scalars.
+  \item The running climb and descent integrals: four scalars
+        (numerator and denominator of $\Delta_c$ and $\Delta_d$).
+  \item The rider parameters: $v_{\text{flat}}$, $m$, and the fixed
+        physics constants. A few more scalars.
+\end{itemize}
+Total state size is on the order of a few hundred bytes. Per-tick
+cost is a constant-time histogram update plus two constant-time
+integral updates plus a dot product of size $\sim$40.
+
+\section{Summary}
+
+Method~D is a deliberately simple ETA estimator built around two
+ideas. First, a physics-based speed-ratio table $r(g) = v(g) /
+v_{\text{flat}}$ derived from a Cardano-solved force balance, with
+small behavioral adjustments that make the curve shape-stable across
+different rider operating points. Second, a cumulative integral
+correction over observed climb and descent rows that absorbs any
+steady bias the physics model cannot predict. A brief warmup period
+uses a prior-free $v_{\text{flat}}$ observer to recalibrate the
+ratio table at the rider's actual operating point, removing most of
+the sensitivity to an initial $v_{\text{flat}}$ guess. The
+time-to-go computation reduces to a dot product between the rider's
+inverse-ratio vector and a histogram of remaining route length
+binned by gradient, which is cheap to evaluate, trivial to update
+incrementally, and small enough to fit comfortably in a bike
+computer's memory footprint.
+
+The method does not attempt to model fatigue, wind, group dynamics,
+or mid-ride state changes. Instead it relies on the cumulative
+integrals to absorb whatever steady bias these unmodeled effects
+introduce, and on the ride being long enough for the expanding
+window to dominate minor within-ride variations. For the rider's own
+repeated rides this assumption holds comfortably; for rides with
+violent mid-ride state changes (bonking, severe weather shifts) the
+method's accuracy degrades gracefully rather than catastrophically.
+
+\end{document}
