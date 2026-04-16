@@ -876,11 +876,15 @@ correction, illustrating the gap the corrections must close.
 
 \begin{table}[ht]
 \centering
-\caption{Build-up of estimator complexity. Each row adds one feature
-to the row above. MAE is mean absolute ETA error in minutes (lower is
+\caption{Build-up of estimator complexity. Shaded rows are oracle
+bounds that cheat with end-of-ride information (see
+Section~\ref{sec:oracle}). Each subsequent row adds one feature to
+the row above. MAE is mean absolute ETA error in minutes (lower is
 better). \emph{Behav.}: ``--'' = constant power, ``param'' =
-parametric, ``emp'' = empirical $\pi(g)$. \emph{Rel.}: relevance
-filter --- ``\cmark'' = always on, ``cond'' = mountains only.}
+parametric, ``emp'' = empirical $\pi(g)$. \emph{$\Delta$}: correction
+channels --- ``4-dur'' = duration-bucketed (short/medium/long climb +
+descent). \emph{Rel.}: relevance filter --- ``cond'' = mountains
+only.}
 \label{tab:buildup}
 \sisetup{round-mode=places, round-precision=1}
 \small
@@ -894,6 +898,15 @@ Estimator
   & {Pancake} & {Rolling} & {M.~hills} & {Hills} & {Mtn} \\
   & & & & &
   & {$(168)$} & {$(26)$} & {$(32)$} & {$(50)$} & {$(14)$} \\
+\midrule
+\rowcolor{black!5}
+Oracle naive ($v_\text{true}$)
+  & {--} & {--} & {--} & {--} & {--}
+  & 1.8 & 2.7 & 3.8 & 5.6 & 11.3 \\
+\rowcolor{black!5}
+Oracle corrections
+  & {\cmark} & {param} & {4-dur} & {cond} & {--}
+  & 2.8 & 3.5 & 5.0 & 5.3 & 8.2 \\
 \midrule
 Moving average
   & {--} & {--} & {--} & {--} & {--}
@@ -913,6 +926,9 @@ Behavioural prior
 \quad + profile-conditional
   & {\cmark} & {param} & {split} & {cond} & {--}
   & 5.6 & 8.6 & 10.0 & 14.9 & 11.6 \\
+\quad + route-adaptive $\alpha$/$\kappa$
+  & {\cmark} & {tuned} & {4-dur} & {cond} & {--}
+  & 5.8 & 8.7 & 10.4 & 14.2 & 9.3 \\
 \quad + ride power curve
   & {\cmark} & {emp} & {split} & {cond} & {ride}
   & 5.7 & 9.2 & 9.8 & 14.5 & 10.6 \\
@@ -923,6 +939,19 @@ Behavioural prior
 \bottomrule
 \end{tabular}
 \end{table}
+
+The two oracle rows frame the discussion. The oracle naive (true
+whole-ride average speed, no physics) shows the \emph{within-ride pace
+variability floor}: the best any constant-speed model can achieve.
+Hills are low (5.6) because speed oscillations between bergs and flats
+cancel over mixed terrain; mountains are high (11.3) because the
+sustained speed difference between climbing and descending does not
+cancel. The oracle corrections (physics model with perfect correction
+values from row~0) show what the full apparatus achieves when
+convergence is instantaneous: 5.3 on hills (below the naive floor,
+proving physics helps when calibrated) and 8.2 on mountains. The gap
+between these oracles and the real estimators below is pure
+convergence overhead --- the cost of learning the corrections online.
 
 Several patterns stand out. The moving average is a strong baseline on
 flat rides (MAE 6.1\,min on pancake) but collapses on mountains
