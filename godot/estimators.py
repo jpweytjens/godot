@@ -3213,11 +3213,12 @@ class EmpiricalPowerRelevantSplitEstimator(RelevantSplitIntegralPhysicsEstimator
         self,
         cfg: RideConfig,
         p_curve: dict[int, float],
+        p_counts: dict[int, int] | None = None,
+        n_full: float = 100.0,
         min_relevant_s: float = 120.0,
     ) -> None:
         super().__init__(cfg, min_relevant_s=min_relevant_s)
-        # Start from the realistic physics ratios (behavioural model)
-        # and override only bins where we have empirical P data.
+        self._n_full = n_full
         base_ratios = dict(cfg.realistic_ratios)
         empirical = empirical_power_ratios(
             mass_kg=cfg.total_mass_kg,
@@ -3229,8 +3230,11 @@ class EmpiricalPowerRelevantSplitEstimator(RelevantSplitIntegralPhysicsEstimator
             headwind_ms=cfg.headwind_ms,
         )
         for pct in p_curve:
-            if pct in empirical:
-                base_ratios[pct] = empirical[pct]
+            if pct not in empirical:
+                continue
+            n = p_counts.get(pct, n_full) if p_counts is not None else n_full
+            w = min(1.0, n / n_full)
+            base_ratios[pct] = w * empirical[pct] + (1 - w) * base_ratios.get(pct, 1.0)
         self._ratios = base_ratios
 
     def __str__(self) -> str:

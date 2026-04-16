@@ -20,6 +20,7 @@ from godot.config import RideConfig
 from godot.estimators import (
     AvgSpeedEstimator,
     EmpiricalPowerRelevantSplitEstimator,
+    RealisticPhysicsEstimator,
     RelevantCalibratedSplitPhysicsEstimator,
     RelevantSplitIntegralPhysicsEstimator,
     SplitIntegralPhysicsEstimator,
@@ -50,8 +51,10 @@ def score(estimator, rides) -> list[dict]:
     return [_score_one(ride, estimator) for ride in rides]
 
 
-def _single_ride_p_curve(path: Path, min_samples: int = 30) -> dict[int, float] | None:
-    """Compute P(g)/P(0) from a single FIT file."""
+def _single_ride_p_curve(
+    path: Path, min_samples: int = 1
+) -> tuple[dict[int, float], dict[int, int]] | None:
+    """Compute P(g)/P(0) and counts from a single FIT file."""
     if path.suffix.lower() != ".fit":
         return None
     try:
@@ -82,12 +85,15 @@ def _single_ride_p_curve(path: Path, min_samples: int = 30) -> dict[int, float] 
 
         grad_pct = np.round(gradient[mask.values] * 100).astype(int)
         p_ratio = (df.loc[mask, "watts"] / p_flat).to_numpy()
-        result: dict[int, float] = {}
+        ratios: dict[int, float] = {}
+        counts: dict[int, int] = {}
         for g in range(-15, 16):
             in_bin = grad_pct == g
-            if in_bin.sum() >= min_samples:
-                result[g] = float(np.median(p_ratio[in_bin]))
-        return result if len(result) >= 3 else None
+            n = int(in_bin.sum())
+            if n >= min_samples:
+                ratios[g] = float(np.median(p_ratio[in_bin]))
+                counts[g] = n
+        return (ratios, counts) if len(ratios) >= 3 else None
     except Exception:
         return None
 
@@ -102,10 +108,14 @@ def score_per_ride_empirical(
     """Score using per-ride P(g)/P(0) curves, falling back when unavailable."""
     out = []
     for ride, path in zip(rides, paths):
-        p_curve = _single_ride_p_curve(path)
-        if p_curve:
+        result = _single_ride_p_curve(path)
+        if result:
+            p_curve, p_counts = result
             est = EmpiricalPowerRelevantSplitEstimator(
-                cfg, p_curve=p_curve, min_relevant_s=min_relevant_s
+                cfg,
+                p_curve=p_curve,
+                p_counts=p_counts,
+                min_relevant_s=min_relevant_s,
             )
         else:
             est = fallback_est
@@ -142,8 +152,10 @@ _SUMMARY_KEYS = (
 )
 
 
-def _compute_p_curve(paths: list[Path]) -> dict[int, float] | None:
-    """Compute empirical P(g)/P(0) from FIT files with power data."""
+def _compute_p_curve(
+    paths: list[Path],
+) -> tuple[dict[int, float], dict[int, int]] | None:
+    """Compute empirical P(g)/P(0) and counts from FIT files with power data."""
     fit_paths = [p for p in paths if p.suffix.lower() == ".fit"]
     if not fit_paths:
         return None
@@ -190,15 +202,18 @@ def _compute_p_curve(paths: list[Path]) -> dict[int, float] | None:
 
     grad_arr = np.concatenate(all_grad_pct)
     ratio_arr = np.concatenate(all_p_ratio)
-    result: dict[int, float] = {}
+    ratios: dict[int, float] = {}
+    counts: dict[int, int] = {}
     for g in range(-15, 16):
         in_bin = grad_arr == g
-        if in_bin.sum() >= 100:
-            result[g] = float(np.median(ratio_arr[in_bin]))
+        n = int(in_bin.sum())
+        if n >= 100:
+            ratios[g] = float(np.median(ratio_arr[in_bin]))
+            counts[g] = n
     print(
-        f"  P(g)/P(0) curve: {len(result)} bins, range [{min(result)}..{max(result)}]%"
+        f"  P(g)/P(0) curve: {len(ratios)} bins, range [{min(ratios)}..{max(ratios)}]%"
     )
-    return result
+    return (ratios, counts)
 
 
 def main() -> None:
@@ -239,13 +254,15 @@ def main() -> None:
     print(f"difficulty: {bucket_counts}")
     print()
 
-    p_curve = _compute_p_curve(paths)
+    p_curve_result = _compute_p_curve(paths)
+    p_curve, p_counts = p_curve_result if p_curve_result else (None, None)
 
     all_variants: list[tuple[str, str, object]] = []
     all_variants.append(("MovingAvg", "-", AvgSpeedEstimator(moving_only=True)))
     for v_flat_kmh in args.v_flat_priors:
         cfg = RideConfig(v_flat_kmh=v_flat_kmh)
         tag = f"v={v_flat_kmh:.0f}"
+        all_variants.append(("PhysPrior", tag, RealisticPhysicsEstimator(cfg)))
         all_variants.append(("Split", tag, SplitIntegralPhysicsEstimator(cfg)))
         for t in args.thresholds:
             all_variants.append(
@@ -261,7 +278,7 @@ def main() -> None:
                         "EmpPower",
                         tag,
                         EmpiricalPowerRelevantSplitEstimator(
-                            cfg, p_curve=p_curve, min_relevant_s=t
+                            cfg, p_curve=p_curve, p_counts=p_counts, min_relevant_s=t
                         ),
                     )
                 )

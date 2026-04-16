@@ -635,6 +635,87 @@ Total state size is on the order of a few hundred bytes. Per-tick
 cost is a constant-time histogram update plus two constant-time
 integral updates plus a dot product of size $\sim$40.
 
+\section{Results}
+\label{sec:results}
+
+Table~\ref{tab:buildup} shows the effect of each architectural layer
+on a corpus of 290 historical rides, partitioned by route difficulty
+using a PCS-inspired climb-score classification (flat: no significant
+climb; hills: at least one climb $\ge$\,5 PCS points; mountains: at
+least one climb $\ge$\,50 PCS points). Each row adds exactly one
+feature to the previous row; the MAE column shows the mean absolute
+ETA error in minutes, averaged across rides in each bucket. The
+physics prior row uses the parametric behavioral model without any
+online correction, illustrating the gap the integral corrections must
+close.
+
+\begin{table}[ht]
+\centering
+\caption{Build-up of estimator complexity. Each row adds one feature
+(marked~$\bullet$) to the row above. MAE is mean absolute ETA error in
+minutes (lower is better). The ``power'' column indicates whether
+a power meter is required.}
+\label{tab:buildup}
+\sisetup{round-mode=places, round-precision=1}
+\begin{tabular}{@{} l ccccc S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
+\toprule
+& \multicolumn{5}{c}{Features}
+& \multicolumn{3}{c}{MAE (min)} \\
+\cmidrule(lr){2-6} \cmidrule(lr){7-9}
+Estimator
+  & {$r(g)$} & {Behav.} & {$\Delta_{c,d}$} & {Rel.} & {Power}
+  & {Flat} & {Hills} & {Mtn} \\
+  & & & & &
+  & {$(n\!=\!226)$} & {$(n\!=\!50)$} & {$(n\!=\!14)$} \\
+\midrule
+Moving average
+  & {--} & {--} & {--} & {--} & {--}
+  & 7.1 & 17.5 & 29.9 \\
+Physics prior
+  & {$\bullet$} & {param} & {--} & {--} & {--}
+  & 7.8 & 19.4 & 25.7 \\
+\quad + split correction
+  & {$\bullet$} & {param} & {$\bullet$} & {--} & {--}
+  & 6.6 & 14.9 & 14.3 \\
+\quad + relevance filter
+  & {$\bullet$} & {param} & {$\bullet$} & {$\bullet$} & {--}
+  & 6.7 & 15.1 & 11.6 \\
+\quad + ride power curve
+  & {$\bullet$} & {emp} & {$\bullet$} & {$\bullet$} & {ride}
+  & 6.7 & 14.5 & 10.6 \\
+\quad + cached profile
+  & {$\bullet$} & {emp} & {$\bullet$} & {$\bullet$} & {cached}
+  & 6.7 & 14.7 & 9.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several patterns stand out. The moving average is a strong baseline on
+flat rides (MAE 7.1\,min) but collapses on mountains
+(29.9\,\si{\minute}) because it cannot anticipate upcoming terrain.
+The physics prior alone actually \emph{worsens} the hill estimate
+(19.4 vs 17.5\,\si{\minute}) because its systematic bias
+(MPE~$= -15$\,\% on mountains) compounds without correction~--- the
+model has the right \emph{shape} but the wrong \emph{level}. Adding
+split integral corrections cuts the mountain error in half (14.3) by
+fixing the level independently for climbs and descents.
+
+The relevance filter provides no benefit on flat rides (where it is
+correctly a no-op) but reduces mountain MAE by a further 19\,\%
+(11.6). This is the core Method~D contribution: by learning only from
+segments whose predicted traversal time exceeds 120\,\si{\second},
+the integral corrections avoid contamination from short punchy efforts
+that do not represent the rider's sustained-climb behavior.
+
+The power-curve rows show the additional benefit when a power meter is
+available. A per-ride empirical $\pi(g)$ curve, trust-ramped against
+the parametric fallback, improves hills (best at 14.5) and mountains
+(10.6). A cached cross-ride profile improves mountains further (9.9)
+at the cost of requiring historical data. In both cases the power
+meter is optional: the no-power variant at 11.6\,\si{\minute} is
+already a 61\,\% reduction from the moving-average baseline.
+
+
 \section{Summary}
 
 Method~D is a deliberately simple ETA estimator built around two
