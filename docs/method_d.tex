@@ -858,6 +858,61 @@ Total state size is on the order of a few hundred bytes. Per-tick
 cost is a constant-time histogram update plus two constant-time
 integral updates plus a dot product of size $\sim$40.
 
+\section{Metrics}
+\label{sec:metrics}
+
+All metrics compare predicted remaining moving time to actual
+remaining moving time at each 1\,\si{\hertz} tick, excluding the
+first 2\,\% of ride distance (warmup). Unless stated otherwise,
+results report averages across rides in each difficulty bucket.
+
+\begin{description}
+\item[MAE (Mean Absolute Error, minutes)]
+  $\frac{1}{N}\sum_i |\text{ETA}_i - \text{ATA}_i|$.
+  The average prediction error across all ticks. Dominated by
+  mid-ride ticks where absolute remaining time is large and the
+  prediction has the most room to be wrong. A constant-speed oracle
+  (true whole-ride average) does \emph{not} give $\text{MAE} = 0$:
+  it gives 1.8\,\si{\minute} on pancake rides and 5.6 on hills,
+  because the rider's speed varies within the ride and the remaining
+  portion's average speed differs from the whole-ride average at
+  every moment.
+\item[MPE (Mean Percentage Error, \%)]
+  $\frac{1}{N}\sum_i (\text{ETA}_i - \text{ATA}_i) / \text{ATA}_i
+  \times 100$. Signed: positive means the estimator overpredicts
+  remaining time (rider arrives earlier than predicted); negative
+  means the rider arrives later. An unbiased estimator has
+  $\text{MPE} \approx 0$.
+\item[MAPE (Mean Absolute Percentage Error, \%)]
+  $\frac{1}{N}\sum_i |\text{ETA}_i - \text{ATA}_i| / \text{ATA}_i
+  \times 100$. Normalises by remaining time, so a 5-minute error at
+  2\,hours remaining (4\,\%) is weighted the same as a 1-minute error
+  at 24\,minutes remaining (4\,\%). Less dominated by mid-ride ticks
+  than MAE.
+\item[RMSE (Root Mean Square Error, minutes)]
+  $\sqrt{\frac{1}{N}\sum_i (\text{ETA}_i - \text{ATA}_i)^2}$.
+  Penalises large errors more than MAE. A useful companion metric:
+  if RMSE $\gg$ MAE, the estimator has occasional large spikes
+  rather than uniform moderate error.
+\item[Settle time (minutes)]
+  The moving time until the prediction stabilises within
+  $\pm$5\,\% of its final-tick value. Measures convergence speed:
+  how long the rider must wait before the ETA becomes trustworthy.
+\end{description}
+
+The distinction between MAE and the oracle floor deserves emphasis.
+An estimator with $\text{MAE} = 5$\,\si{\minute} on hills is not
+``5\,minutes wrong on average'' in the sense a rider might expect.
+It means: across all moments of all rides, the average absolute
+deviation between predicted and actual remaining time is
+5\,\si{\minute}. Early in the ride (when remaining time is
+$\sim$3\,\si{\hour}) the error may be 10+\,\si{\minute}; near the
+end it may be $<$\,1\,\si{\minute}. The MAE averages these. For a
+rider making pacing decisions, the error at a specific ride fraction
+(e.g.\ 50\,\%, 75\,\%) is often more relevant than the ride-average
+MAE.
+
+
 \section{Results}
 \label{sec:results}
 
