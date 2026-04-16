@@ -981,16 +981,19 @@ Behavioural prior
 \quad + profile-conditional
   & {\cmark} & {param} & {split} & {cond} & {--}
   & 5.6 & 8.6 & 10.0 & 14.9 & 11.6 \\
-\quad + route-adaptive $\alpha$/$\kappa$
+\quad + 4-dur + adaptive $\alpha$/$\kappa$
   & {\cmark} & {tuned} & {4-dur} & {cond} & {--}
   & 5.8 & 8.7 & 10.4 & 14.2 & 9.3 \\
 \quad + ride power curve
-  & {\cmark} & {emp} & {split} & {cond} & {ride}
-  & 5.7 & 9.2 & 9.8 & 14.5 & 10.6 \\
+  & {\cmark} & {emp} & {4-dur} & {cond} & {ride}
+  & 6.5 & 7.8 & 10.2 & 14.7 & 10.2 \\
+\quad + time lerp ($f^2$)
+  & {\cmark} & {tuned} & {4-dur} & {cond} & {--}
+  & 5.5 & 8.1 & 10.1 & 14.2 & 12.2 \\
 \cmidrule(lr){1-11}
 \quad + cached profile
-  & {\cmark} & {emp} & {split} & {cond} & {cached}
-  & 5.7 & 9.1 & 9.9 & 14.7 & 9.9 \\
+  & {\cmark} & {emp} & {4-dur} & {cond} & {cached}
+  & 5.8 & 8.6 & 10.4 & 14.2 & 10.1 \\
 \bottomrule
 \end{tabular}
 \end{table}
