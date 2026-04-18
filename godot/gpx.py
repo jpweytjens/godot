@@ -54,6 +54,8 @@ def read_gpx(path: Path) -> pd.DataFrame:
                         },
                     }
                 )
+    if not rows:
+        raise ValueError("GPX file contains no trackpoints")
     return pd.DataFrame(rows).sort_values("time").reset_index(drop=True)
 
 
