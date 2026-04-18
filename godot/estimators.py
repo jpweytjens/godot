@@ -5114,6 +5114,13 @@ class VerySplitIntegralPhysicsEstimator(BaseEstimator):
         self._p_max_multiplier = cfg.p_max_multiplier
         self._descent_decay_k = cfg.descent_decay_k
 
+    def _extra_row_mask(self, ride: Ride) -> np.ndarray:
+        """Per-row mask gating which rows feed the split integrals.
+
+        Default: accept everything. Subclasses override to filter rows.
+        """
+        return np.ones(len(ride.df), dtype=bool)
+
     def _integrals(self, ride: Ride) -> tuple[pd.Series, pd.Series]:
         """See `SplitIntegralPhysicsEstimator._integrals` for the derivation."""
         return self._split_integrals(ride, self._v_flat_ms)
