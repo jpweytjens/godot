@@ -180,7 +180,9 @@ PLAN.MD
 CLAUDE.md
 *.ipynb
 data/
-docs/
+docs/.aux/
+docs/superpowers/
+docs/tables/
 output/
 profiles/
 .DS_Store

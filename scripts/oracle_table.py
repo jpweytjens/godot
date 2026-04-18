@@ -1,4 +1,4 @@
-"""Oracle decomposition table for method_d.pdf.
+"""Oracle decomposition table for godot.pdf.
 
 Computes three oracle baselines across the ride corpus:
 
