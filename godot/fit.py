@@ -49,6 +49,13 @@ def read_fit(path: Path) -> pd.DataFrame:
     if errors:
         raise ValueError(f"FIT decode errors: {errors}")
 
+    # Filter: only cycling activities
+    sessions = messages.get("session_mesgs", [])
+    if sessions:
+        sport = sessions[0].get("sport", "")
+        if sport != "cycling":
+            raise ValueError(f"Not a cycling activity (sport={sport!r})")
+
     records = messages.get("record_mesgs", [])
     if not records:
         return pd.DataFrame(columns=["time", "lat", "lon", "elevation_m", "speed_ms"])
