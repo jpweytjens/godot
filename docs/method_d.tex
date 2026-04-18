@@ -800,6 +800,7 @@ improvement or introduced spurious resets that hurt more than they
 helped.
 
 \section{Why the unmodeled effects are tolerable}
+\label{sec:tolerable}
 
 The estimator's central claim is that, as long as ride duration is
 sufficiently long relative to the integral correction's effective
@@ -827,9 +828,87 @@ harder than predicted on 5\,\% gradients but only 5\% harder on
 10\,\% gradients) or within the descent class. Such biases would
 correspond to genuine shape errors in the ratio table, and the
 behavioral tweaks in Section~2 are what the method offers as a
-mitigation. They are not perfect, but across our corpus the residual
-shape error within a terrain class is small enough that the integrals
-do most of the work.
+mitigation. We can quantify how small these residuals actually are.
+
+\paragraph{Within-class shape error from $v_{\text{flat}}$ misspecification.}
+
+The most common source of ratio-table shape error within a ride is a
+$v_{\text{flat}}$ that drifts from its calibrated value~--- through
+fatigue, a wind shift, or warmup estimation error. Because the cubic
+force balance is nonlinear, the \emph{shape} of $r(g)$ depends on the
+operating point: a table built at $\SI{30}{\km\per\hour}$ is not
+identical in shape to one built at $\SI{27}{\km\per\hour}$.
+Table~\ref{tab:shape-distortion} shows the distortion
+$r'(g) / r(g)$ when the ratio table is evaluated at a
+$v_{\text{flat}}$ that differs from the calibration point.
+
+\begin{table}[ht]
+\centering
+\caption{Ratio-table shape distortion $r'(g)/r(g)$ when
+$v_{\text{flat}}$ differs from the calibration point
+($\SI{30}{\km\per\hour}$). Values below 1.00 mean the stale table
+overpredicts speed at that gradient; above 1.00 means it
+underpredicts. The rightmost column shows the within-class spread:
+the range of distortion values across all gradients in that terrain
+class.}
+\label{tab:shape-distortion}
+\sisetup{round-mode=places, round-precision=3}
+\begin{tabular}{@{} l *{4}{S[table-format=1.3]} c *{3}{S[table-format=1.3]} c @{}}
+\toprule
+& \multicolumn{4}{c}{Climb gradients} & & \multicolumn{3}{c}{Descent gradients} & \\
+\cmidrule(lr){2-5} \cmidrule(lr){7-9}
+{$v_{\text{flat}}$ error}
+  & {3\,\%} & {5\,\%} & {10\,\%} & {15\,\%}
+  & {spread}
+  & {$-$3\,\%} & {$-$5\,\%} & {$-$10\,\%}
+  & {spread} \\
+\midrule
+$-$10\,\% (\SI{27}{\km\per\hour})
+  & 0.959 & 0.951 & 0.953 & 0.959
+  & {0.008}
+  & 1.144 & 1.153 & 1.165
+  & {0.021} \\
+$-$3\,\% (\SI{29}{\km\per\hour})
+  & 0.987 & 0.984 & 0.984 & 0.986
+  & {0.003}
+  & 1.046 & 1.050 & 1.054
+  & {0.008} \\
+$+$3\,\% (\SI{31}{\km\per\hour})
+  & 1.013 & 1.016 & 1.016 & 1.014
+  & {0.003}
+  & 0.957 & 0.953 & 0.949
+  & {0.008} \\
+$+$10\,\% (\SI{33}{\km\per\hour})
+  & 1.039 & 1.051 & 1.056 & 1.051
+  & {0.017}
+  & 0.880 & 0.872 & 0.863
+  & {0.017} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+On climbs, the distortion is nearly uniform: even a $\pm 10\,\%$
+$v_{\text{flat}}$ error produces a within-class spread of less than
+0.02 across all climb gradients. Because $\Delta_c$ is a scalar that
+scales all climb predictions equally, a uniform shift is exactly what
+it can absorb. The physical reason is that climbing is
+gravity-dominated: the gravity term $m g \sin\theta \cdot v$ accounts
+for most of the power budget on any real hill, and speed scales
+approximately linearly with power. A change in rider effort, fatigue,
+or $v_{\text{flat}}$ calibration error shifts all climb ratios by
+nearly the same factor, and $\Delta_c$ captures this as a scale
+correction.
+
+Descents are more sensitive. The same $\pm 10\,\%$ shift produces
+within-class spreads that are $2$--$3\times$ larger, because
+aerodynamic drag ($\propto v^3$) dominates descent speeds and makes
+the equilibrium at each gradient respond differently to operating-point
+changes. But climbs dominate ETA error because the rider spends far
+more time on them: a $10\,\%$ climb at $\SI{8}{\km\per\hour}$
+contributes 7.5 minutes per kilometer of route, while a $-10\,\%$
+descent at $\SI{50}{\km\per\hour}$ contributes 1.2 minutes. The
+terrain class where $\Delta$ is least able to absorb within-class
+shape error is also the one that matters least for prediction accuracy.
 
 The upshot is that, for rides lasting at least $\sim$30 minutes and
 for rider-environment mismatches that are steady over the ride,
@@ -1139,6 +1218,34 @@ faster than the model's advantage can accumulate. Both corrections
 are fully converged, but there is not enough remaining ride for the
 improvement to compound.
 
+\paragraph{A small correction, a large effect.}
+
+The oracle decomposition in Table~\ref{tab:oracle} reveals how
+disproportionate the convergence cost is. On hills, the corpus-wide
+median $\Delta_c$ is 0.93 --- a 7\,\% correction. Yet knowing this
+value in advance collapses the MAE from 12.0 (real estimator) to 3.9
+(oracle physics). The arithmetic is straightforward: if two hours of
+climbing remain and the speed prediction is 7\,\% too fast, the ETA is
+wrong by $\sim$8 minutes. The correction is small; it applies to a
+large remaining distance.
+
+This explains the centroid pattern in Table~\ref{tab:centroid}. On
+front-loaded routes, the climbing happens before $\Delta_c$ has
+converged from 1.0 toward 0.93. The model carries a 7\,\% bias across
+the largest remaining distance, producing the worst MAE. On mid-loaded
+routes, enough early climbing has driven $\Delta_c$ close to its final
+value, and the remaining climbing benefits from the calibrated
+prediction. On back-loaded routes, $\Delta_c$ converges from
+non-climbing observations only slowly, but little distance remains
+for the bias to matter.
+
+Cross-ride persistence of $\Delta_c$ would flatten this centroid
+dependence entirely. Starting each ride at $\Delta_c \approx 0.93$
+(the previous ride's final value) means front-loaded routes no longer
+pay a convergence penalty --- the correction is already correct from
+row~0. The benefit is largest exactly where the current architecture
+is weakest.
+
 
 \subsection{Where does the error come from?}
 \label{sec:oracle}
@@ -1167,26 +1274,29 @@ unavailable in practice:
 
 \begin{table}[ht]
 \centering
-\caption{Oracle and ceiling analysis: MAE (minutes) by route
-difficulty. The gap between oracle corrections and the real estimator
-is the convergence overhead --- the cost of learning the corrections
-online rather than knowing them in advance.}
+\caption{Oracle decomposition: MAE (minutes) by route difficulty.
+Three baselines isolate the contribution of pace knowledge and
+gradient-aware physics.
+\emph{Oracle naive}: true whole-ride moving average, no physics.
+\emph{Phys + prior}: physics model with perfect $\Delta$ from row~0,
+using the configured $v_{\text{flat}}$ prior.
+\emph{Phys + oracle $v_{\text{flat}}$}: same, but the ratio table is
+built at the ride's true flat-section average.
+Generated by \texttt{scripts/oracle\_table.py} over the full
+750-ride Strava corpus.}
 \label{tab:oracle}
+% Data from scripts/oracle_table.py → tables/oracle_decomposition.csv
 \sisetup{round-mode=places, round-precision=1}
-\begin{tabular}{@{} l S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
+\begin{tabular}{@{} l r S[table-format=2.1] S[table-format=2.1] S[table-format=2.1] @{}}
 \toprule
-& {M.~hills} & {Hills} & {Mtn} \\
-& {$(89)$} & {$(132)$} & {$(29)$} \\
+{Difficulty} & {$n$} & {Naive ($v_\text{true}$)}
+  & {Phys + prior} & {Phys + oracle $v_\text{flat}$} \\
 \midrule
-Oracle naive ($v_\text{true}$, no physics)
-  & 3.4 & 5.1 & 11.5 \\
-Oracle corrections (physics, perfect $\Delta$)
-  & 3.3 & 4.7 & 12.6 \\
-\midrule
-4-dur + adaptive (real estimator)
-  & 9.2 & 12.0 & 14.0 \\
-Moving average
-  & 10.0 & 14.8 & 33.6 \\
+pancake      & 410 & 1.7 & 1.5 & 1.5 \\
+rolling      &  72 & 2.1 & 1.9 & 2.0 \\
+minor\_hills &  90 & 2.6 & 2.5 & 2.5 \\
+hills        & 144 & 4.4 & 3.9 & 3.9 \\
+mountains    &  34 & 10.4 & 5.1 & 4.9 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1195,38 +1305,35 @@ Three findings emerge from Table~\ref{tab:oracle}.
 
 \paragraph{The within-ride variability floor.}
 Even knowing the rider's true average speed perfectly, the oracle
-naive achieves only 5.1\,\si{\minute} on hills and 11.5 on
+naive achieves only 4.4\,\si{\minute} on hills and 10.4 on
 mountains --- not zero. The residual is from pace variation
 \emph{within} the ride: fatigue in the second half, headwind on the
 return leg, group dynamics, variable effort across different bergs.
 No constant-speed model can go below this floor.
 
-\paragraph{Physics helps on hills, hurts on mountains.}
-On hills, oracle corrections (4.7) beat oracle naive (5.1) by
-0.4\,\si{\minute} --- per-gradient predictions outperform the
-aggregate when perfectly calibrated. On mountains, however, oracle
-corrections (12.6) are \emph{worse} than oracle naive (11.5). This
-reversal, absent in the smaller 290-ride corpus, appears because the
-expanded mountain set (29 rides) includes more diverse terrain where
-the ratio table's per-gradient shape errors are correlated and do not
-cancel. The naive model's error-cancellation property is more
-valuable than per-segment accuracy on these rides. This finding
-suggests that the behavioral parameters ($\alpha = 0.25$,
-$\kappa = 0.45$) tuned on the original 14 mountain rides do not
-generalise to the broader mountain corpus and need retuning --- or
-that the mountain category itself is too heterogeneous for a single
-parameter set.
+\paragraph{Physics halves the mountain error.}
+On mountains, physics with perfect corrections cuts the naive error
+in half (10.4 $\to$ 5.1). On hills the improvement is smaller (4.4
+$\to$ 3.9) because the terrain mix is gentler and the pace
+variability floor is already low. The gradient-aware model earns its
+keep exactly where it should: on sustained climbing and descending
+where a constant-speed projection is most wrong.
 
-\paragraph{Convergence remains the dominant cost on hills.}
-The gap between oracle corrections and the real estimator is
-7.3\,\si{\minute} on hills (4.7 vs 12.0). On mountains the gap is
-only 1.4\,\si{\minute} (12.6 vs 14.0), but this is misleading:
-the oracle corrections themselves are already worse than the naive
-floor, so the physics model's ceiling on mountains is set by its
-shape quality, not by convergence speed. The practical implication
-differs by terrain: on hills, faster convergence is the lever; on
-mountains, better shape (retuned $\alpha$/$\kappa$ or the empirical
-power curve) is the lever.
+\paragraph{Knowing $v_{\text{flat}}$ barely helps.}
+The gap between prior and oracle $v_{\text{flat}}$ is at most
+0.2\,\si{\minute} (mountains: 5.1 vs 4.9). When the integral
+corrections are perfect, a wrong $v_{\text{flat}}$ produces a scale
+error in the ratio table that $\Delta_c$ and $\Delta_d$ absorb
+almost entirely --- consistent with the shape-distortion analysis
+in Section~\ref{sec:tolerable}. This means the $v_{\text{flat}}$
+estimator is not load-bearing: the warmup machinery and prior-free
+observer are a convenience, not a necessity. The corrections do the
+pace-learning work that oracle naive gets for free. The real
+bottleneck is convergence --- learning $\Delta$ online --- not
+$v_{\text{flat}}$ accuracy. Cross-ride persistence of the correction
+factors would start each ride near the oracle-physics column from
+row~0, collapsing the convergence gap without requiring a better
+$v_{\text{flat}}$ estimate.
 
 
 \subsection{When does physics help?}
